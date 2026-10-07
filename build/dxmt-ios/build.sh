@@ -17,7 +17,7 @@ OUT_LIB="$BUILD_DIR/libdxmt_unix.a"
 
 mkdir -p "$OBJ_DIR"
 
-COMMON_FLAGS="-arch arm64 -isysroot $SDK -miphoneos-version-min=18.0 -fblocks -O2"
+COMMON_FLAGS="-arch arm64 -isysroot $SDK -miphoneos-version-min=15.0 -fblocks -O2"
 INCLUDES="-I$DXMT_ROOT/include -I$DXMT_ROOT/libs -I$DXMT_SRC/winemetal -I$DXMT_SRC/airconv"
 INCLUDES_DIRECTX="-I$DXMT_ROOT/include/native/directx -I$DXMT_ROOT/include/native/windows"
 INCLUDES_SHADERS="-I$BUILD_DIR/shader-headers"
@@ -228,16 +228,18 @@ echo "=== MADEIRA: dxmt_madeira_native -- internal command library ==="
 # created, and every game that needs one fails to start. dxmt_command.metal
 # needs nothing past Metal 3.1 (iOS 17), the same version the Windows Metal
 # tools used for the committed header. The AIR target is pinned with it, as in
-# DXMT's meson build (the container format must also be one the OS reads). The
-# script's own timestamp is part of
-# the cache check so that a flag change here regenerates the header.
-DXMT_METAL_STD="${DXMT_METAL_STD:-metal3.1}"
+# DXMT's meson build (the container format must also be one the OS reads).
+# iOS 15 support (iPhone 6s / A9): metal3.1 is iOS 17 only, so the version is
+# lowered to metal2.3 (iOS 15, macOS 12) and the AIR target with it. The same
+# lowering applies to any runtime-converted shaders through the converter.
+DXMT_METAL_STD="${DXMT_METAL_STD:-metal2.3}"
+DXMT_AIR_TARGET="${DXMT_AIR_TARGET:-air64-apple-macos12.0}"
 if [ ! -f "$BUILD_DIR/shader-headers/dxmt_command.h" ] \
    || [ "$DXMT_SRC/dxmt/dxmt_command.metal" -nt "$BUILD_DIR/shader-headers/dxmt_command.h" ] \
    || [ "$0" -nt "$BUILD_DIR/shader-headers/dxmt_command.h" ]; then
     mkdir -p "$BUILD_DIR/shader-headers"
     (cd "$BUILD_DIR/shader-headers" \
-     && xcrun -sdk macosx metal -std="$DXMT_METAL_STD" --target=air64-apple-macos14.0 \
+     && xcrun -sdk macosx metal -std="$DXMT_METAL_STD" --target="$DXMT_AIR_TARGET" \
           -o dxmt_command.air -c "$DXMT_SRC/dxmt/dxmt_command.metal" \
      && xcrun -sdk macosx metallib -o dxmt_command.metallib dxmt_command.air \
      && xxd -n dxmt_command -i dxmt_command.metallib dxmt_command.h)
