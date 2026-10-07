@@ -192,7 +192,7 @@ struct FPSOverlay: View {
                         .foregroundColor(.primary)
                     Text("|")
                         .foregroundColor(.secondary)
-                    Text("FPS:")
+                    Text("帧率：")
                         .foregroundColor(.secondary)
                     Text(String(format: "%.1f", fps))
                         .foregroundColor(fpsColor)
