@@ -36,8 +36,19 @@ extern kern_return_t mach_vm_region(vm_map_t, mach_vm_address_t *, mach_vm_size_
 extern kern_return_t mach_vm_protect(vm_map_t, mach_vm_address_t, mach_vm_size_t,
                                      boolean_t, vm_prot_t);
 
-// Page size on iOS is 16KB
-#define JIT_PAGE_SIZE 0x4000
+// Page size: 16KB on A12+ devices, 4KB on iPhone 6s (A9) and other pre-A12
+// hardware. Queried once at first use instead of hard-coded, so the same
+// binary runs on both.
+static size_t madeira_page_size(void) {
+    static size_t ps = 0;
+    if (!ps) {
+        long v = sysconf(_SC_PAGESIZE);
+        ps = (v > 0) ? (size_t)v : 0x4000;
+        jit_log("page size: %zu bytes", ps);
+    }
+    return ps;
+}
+#define JIT_PAGE_SIZE madeira_page_size()
 
 // VM_LEDGER_TAG_DEFAULT and VM_LEDGER_FLAG_NO_FOOTPRINT
 // These are private Mach APIs used by MeloNX to make JIT memory
@@ -478,6 +489,193 @@ bool jit_check_debugged(void) {
     bool debugged = (flags & CS_DEBUGGED) != 0;
     jit_log("CS_DEBUGGED flag: %s (flags=0x%x)", debugged ? "SET" : "NOT SET", flags);
     return debugged;
+}
+
+/* ==========================================================================
+ * Native JIT (jailbreak / TrollStore) -- no debugger needed.
+ *
+ * Two environments grant executable memory without StikDebug:
+ *   - Jailbroken (palera1n on the A9, Dopamine on arm64e, ...): the kernel
+ *     patch removes the W^X enforcement, so an anonymous RWX mapping simply
+ *     works. Probed at run time: try a small anonymous RWX mmap; on stock
+ *     iOS it fails (EPERM), under a jailbreak it succeeds.
+ *   - TrollStore (platform-application + allow-jit entitlement, which this
+ *     app already carries): MAP_JIT works without a debugger. On A12+ the
+ *     mapping starts RX and pthread_jit_write_protect_np flips W; on A9 and
+ *     other pre-A12 (ARMv8.0, no APRR) the mapping is RWX directly and
+ *     writes need no switch at all -- only sys_icache_invalidate before
+ *     executing.
+ *
+ * Probing mmap is the honest test: csops/entitlement checks say what the
+ * binary was SIGNED with, the probe says what the KERNEL allows this
+ * process to do. Every step is logged; failure is non-fatal and falls
+ * through to the debugger flow (StikDebug / built-in StikJIT).
+ * ==========================================================================*/
+
+static int g_native_jit_kind = -1;   /* -1 unknown, 0 none, 1 jailbreak RWX, 2 MAP_JIT */
+
+/* Anonymous RWX: only possible under a jailbreak kernel. */
+static bool madeira_probe_rwx_anon(void) {
+    size_t ps = madeira_page_size();
+    void *p = mmap(NULL, ps, PROT_READ | PROT_WRITE | PROT_EXEC,
+                   MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (p == MAP_FAILED) {
+        jit_log("[native-jit] anon RWX mmap failed (errno=%d %s) -- not jailbroken",
+                errno, strerror(errno));
+        return false;
+    }
+    /* Double-check the kernel did not silently strip X. */
+    vm_address_t a = (vm_address_t)p;
+    vm_size_t sz = 0;
+    vm_region_basic_info_data_64_t info;
+    mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64;
+    mach_port_t obj = MACH_PORT_NULL;
+    bool ok = false;
+    if (vm_region_64(mach_task_self(), &a, &sz, VM_REGION_BASIC_INFO_64,
+                     (vm_region_info_t)&info, &cnt, &obj) == KERN_SUCCESS) {
+        ok = (info.protection & VM_PROT_EXECUTE) && (info.protection & VM_PROT_WRITE);
+        jit_log("[native-jit] anon RWX mapping prot=0x%x -- %s",
+                info.protection, ok ? "W+X kept: JAILBROKEN" : "kernel stripped W/X");
+    } else {
+        ok = true;
+        jit_log("[native-jit] anon RWX mapped (region unreadable, assuming X kept)");
+    }
+    munmap(p, ps);
+    return ok;
+}
+
+/* MAP_JIT: possible without a debugger for a platform-application signed with
+ * the allow-jit entitlement -- what TrollStore grants and stock iOS does not. */
+static bool madeira_probe_map_jit(void) {
+    size_t ps = madeira_page_size();
+    void *p = mmap(NULL, ps, PROT_READ | PROT_WRITE | PROT_EXEC,
+                   MAP_PRIVATE | MAP_ANON | MAP_JIT, -1, 0);
+    if (p == MAP_FAILED) {
+        jit_log("[native-jit] MAP_JIT mmap failed (errno=%d %s)", errno, strerror(errno));
+        return false;
+    }
+    vm_address_t a = (vm_address_t)p;
+    vm_size_t sz = 0;
+    vm_region_basic_info_data_64_t info;
+    mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64;
+    mach_port_t obj = MACH_PORT_NULL;
+    bool ok = false;
+    if (vm_region_64(mach_task_self(), &a, &sz, VM_REGION_BASIC_INFO_64,
+                     (vm_region_info_t)&info, &cnt, &obj) == KERN_SUCCESS) {
+        /* W+X both required: on A12+ MAP_JIT maps RX without W, and writing
+         * it needs the per-thread W^X switch, so that device is better served
+         * by the debugger flow. On A9 and other pre-APRR hardware the mapping
+         * is RWX directly -- the native path takes it. */
+        ok = (info.protection & VM_PROT_EXECUTE) && (info.protection & VM_PROT_WRITE);
+        jit_log("[native-jit] MAP_JIT mapping prot=0x%x max=0x%x", info.protection, info.max_protection);
+    } else {
+        ok = false;
+        jit_log("[native-jit] MAP_JIT mapped but region unreadable -- not taking it");
+    }
+    munmap(p, ps);
+    if (ok) jit_log("[native-jit] MAP_JIT accepted: TrollStore / allow-jit path (RWX directly)");
+    else jit_log("[native-jit] MAP_JIT lacks W (A12+ style) -- debugger flow instead");
+    return ok;
+}
+
+/* 1 = jailbreak RWX, 2 = MAP_JIT, 0 = neither (debugger flow only). */
+int madeira_native_jit_kind(void) {
+    if (g_native_jit_kind >= 0) return g_native_jit_kind;
+    g_native_jit_kind = 0;
+    if (madeira_probe_rwx_anon()) {
+        g_native_jit_kind = 1;
+    } else if (madeira_probe_map_jit()) {
+        g_native_jit_kind = 2;
+    } else {
+        jit_log("[native-jit] no native JIT available -- debugger flow (StikDebug/StikJIT)");
+    }
+    jit_log("[native-jit] kind=%d (%s)", g_native_jit_kind,
+            g_native_jit_kind == 1 ? "jailbreak RWX" :
+            g_native_jit_kind == 2 ? "TrollStore MAP_JIT" : "none");
+    return g_native_jit_kind;
+}
+
+bool madeira_native_jit_available(void) {
+    return madeira_native_jit_kind() != 0;
+}
+
+/* A single native JIT region: one mapping, RWX (jailbreak) or MAP_JIT
+ * (TrollStore). The RX and RW pointers are the SAME address: FEX and Wine
+ * write generated code directly into it. On A12+ MAP_JIT starts without W,
+ * so writes go through pthread_jit_write_protect_np(false) around them
+ * (madeira_native_write_begin/end); on A9 (no APRR) no switch is needed. */
+struct JITRegionNative {
+    void *ptr;
+    size_t size;
+};
+
+static bool madeira_is_pre_aprr_cpu(void) {
+    /* pthread_jit_write_protect_np exists on iOS but is a no-op without APRR
+     * (A12+). Detect by hardware: pre-A12 machines. arm64e is A12+; A9 is
+     * arm64. A device that reports noprocsupport still compiles the call, so
+     * decide by the machine string instead of the API. */
+    static int pre = -1;
+    if (pre < 0) {
+        utsname u;
+        if (uname(&u) == 0) {
+            const char *m = u.machine;
+            /* iPhone 6s/6s+/SE(1st) = iPhone8,x / iPad6,x are A9; iPhone7,x A10;
+             * iPhone8,4? -- list the pre-A12 prefixes. Anything newer defaults
+             * to "not pre" (the safe side: the W switch is harmless there). */
+            pre = (strncmp(m, "iPhone8,", 8) == 0 ||   /* 6s/6s+/SE1: A9 */
+                   strncmp(m, "iPhone9,", 8) == 0 ||   /* 7/7+: A10 */
+                   strncmp(m, "iPhone10,", 9) == 0 ||  /* 8/8+/X: A11 */
+                   strncmp(m, "iPad6,", 6) == 0 ||     /* Pro(9.7,12.9) A9X */
+                   strncmp(m, "iPad7,", 6) == 0)       /* 2017 iPad/iPad Pro 2: A10X */
+                  ? 1 : 0;
+        } else {
+            pre = 0;
+        }
+        jit_log("[native-jit] pre-APRR (no W^X switch) cpu: %d", pre);
+    }
+    return pre == 1;
+}
+
+/* Threaded W toggle for A12+ MAP_JIT. On A9 the mapping is RWX already and
+ * both calls are no-ops. */
+void madeira_native_write_begin(void) {
+    if (madeira_native_jit_kind() != 2) return;          /* RWX: always writable */
+    if (madeira_is_pre_aprr_cpu()) return;               /* pre-A12: no W^X switch */
+    pthread_jit_write_protect_np(0);
+}
+
+void madeira_native_write_end(void) {
+    if (madeira_native_jit_kind() != 2) return;
+    if (madeira_is_pre_aprr_cpu()) return;
+    pthread_jit_write_protect_np(1);
+}
+
+/* Create a native JIT region of `size`. Returns the (single) address, or NULL. */
+void *madeira_native_jit_alloc(size_t size) {
+    int kind = madeira_native_jit_kind();
+    if (kind == 0) return NULL;
+    size_t ps = madeira_page_size();
+    size = (size + ps - 1) & ~(ps - 1);
+
+    int flags = MAP_PRIVATE | MAP_ANON;
+    if (kind == 2) flags |= MAP_JIT;
+    void *p = mmap(NULL, size, PROT_READ | PROT_WRITE | PROT_EXEC, flags, -1, 0);
+    if (p == MAP_FAILED) {
+        jit_log("[native-jit] alloc(%zu) failed (errno=%d %s)", size, errno, strerror(errno));
+        return NULL;
+    }
+    if (kind == 2 && !madeira_is_pre_aprr_cpu()) {
+        /* A12+ MAP_JIT maps RX without W; flip W on for writing, back off. */
+        pthread_jit_write_protect_np(0);
+    }
+    jit_log("[native-jit] alloc %zu bytes at %p (kind=%d)", size, p, kind);
+    return p;
+}
+
+void madeira_native_jit_free(void *addr, size_t size) {
+    if (!addr) return;
+    size_t ps = madeira_page_size();
+    munmap(addr, (size + ps - 1) & ~(ps - 1));
 }
 
 bool jit_test_mapping(void) {
