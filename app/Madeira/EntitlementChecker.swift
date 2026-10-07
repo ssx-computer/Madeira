@@ -30,6 +30,23 @@ func checkAppEntitlement(_ ent: String) -> Bool {
     return false
 }
 
+/* Native JIT (jailbreak / TrollStore): which path the KERNEL allows this
+ * process, probed at run time (see JITAllocator.c). 1 = jailbreak anonymous
+ * RWX, 2 = TrollStore MAP_JIT (pre-APRR hardware maps it RWX directly),
+ * 0 = neither -- stock iOS, where the debugger flow is needed. */
+func canJitNatively() -> Bool {
+    madeira_native_jit_available()
+}
+
+/// The probe result as a word, for the log and the JIT status page.
+func nativeJITKindName() -> String {
+    switch madeira_native_jit_kind() {
+    case 1: return "jailbreak"
+    case 2: return "trollstore"
+    default: return "none"
+    }
+}
+
 struct EntitlementStatus {
     let jitAllowed: Bool
     let increasedMemory: Bool
