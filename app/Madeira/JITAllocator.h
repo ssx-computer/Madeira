@@ -49,6 +49,21 @@ void jit_region_invalidate(JITRegion *region, size_t offset, size_t size);
 // Returns true if the debugger has attached and set the flag.
 bool jit_check_debugged(void);
 
+// ---- Native JIT (jailbreak / TrollStore), no debugger needed ----
+// Which native path the kernel allows: 1 = jailbreak anonymous RWX,
+// 2 = TrollStore MAP_JIT (platform application + allow-jit entitlement),
+// 0 = neither (debugger flow only). Probed at first call, cached.
+int madeira_native_jit_kind(void);
+bool madeira_native_jit_available(void);
+// Allocate a native JIT region: one RWX mapping (jailbreak) or MAP_JIT
+// (TrollStore). On A12+ MAP_JIT the region starts RX; writes must go through
+// madeira_native_write_begin/end (pthread_jit_write_protect_np). On A9
+// (pre-APRR) the region is RWX already and the toggle calls are no-ops.
+void *madeira_native_jit_alloc(size_t size);
+void madeira_native_jit_free(void *addr, size_t size);
+void madeira_native_write_begin(void);
+void madeira_native_write_end(void);
+
 // Install SIGTRAP handler so BRK instructions don't crash the app
 // when no debugger is attached. Must be called before any jit26_* functions.
 void jit_install_trap_handler(void);
