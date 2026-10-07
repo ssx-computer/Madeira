@@ -13,7 +13,7 @@ if [ ! -f "$B/CMakeCache.txt" ]; then
     # each value) so no toolchain file is needed.
     TC="$R/toolchains/llvm-mingw-20260421-ucrt-macos-universal/bin"
     MINGW_FLAGS_INIT="-static -static-libgcc -static-libstdc++ -Wl,--file-alignment=4096,/mllvm:-align-loops=1"
-    cmake -S "$R/FEX" -B "$B" -DCMAKE_BUILD_TYPE=Release -DTUNE_CPU=generic \
+    cmake -S "$R/FEX" -B "$B" -DCMAKE_BUILD_TYPE=Release -DTUNE_CPU=generic -DFEX_IOS_HOST=1 \
         -DCMAKE_SYSTEM_NAME=Windows \
         -DCMAKE_SYSTEM_PROCESSOR=arm64ec-w64-mingw32 \
         -DCMAKE_C_COMPILER="$TC/arm64ec-w64-mingw32-clang" \
