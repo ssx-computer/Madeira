@@ -69,7 +69,7 @@ struct AllSettingsView: View {
     }
 
     var body: some View {
-        NavigationStack {
+        CompatNavigationStack {
             List {
                 Section {
                     Text("Every other option Madeira reads from madeira.cfg. JIT pool, video memory, the swap tier, the sync engine and eco mode are in Settings › Memory & sync. Most options are read when Madeira starts, so close it from the app switcher after a change. Default leaves the option out of the file. Swipe left on a row to reset it.")
@@ -116,9 +116,9 @@ struct AllSettingsView: View {
                 }
             }
             .searchable(text: $search, prompt: "Search options")
-            .navigationTitle("All settings")
+            .navigationTitle("全部设置")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } } }
             .onAppear { values = MadeiraConfig.all() }
         }
     }
@@ -145,7 +145,7 @@ struct ConfigOptionRow: View {
             .foregroundStyle(.secondary)
         }
         .swipeActions {
-            if value != nil { Button("Reset", role: .destructive) { value = nil; draft = "" } }
+            if value != nil { Button("重置", role: .destructive) { value = nil; draft = "" } }
         }
     }
 
@@ -153,9 +153,9 @@ struct ConfigOptionRow: View {
         switch option.kind {
         case .bool:
             Picker(option.displayTitle, selection: Binding(get: { value ?? "" }, set: { value = $0.isEmpty ? nil : $0 })) {
-                Text("Default").tag("")
+                Text("默认").tag("")
                 Text("On").tag("1")
-                Text("Off").tag("0")
+                Text("关").tag("0")
                 if let v = value, !["1", "0"].contains(v) { Text(v).tag(v) }
             }
         case .choice:
@@ -167,7 +167,7 @@ struct ConfigOptionRow: View {
             HStack {
                 Text(option.displayTitle).lineLimit(2)
                 Spacer(minLength: 12)
-                TextField("Default", text: $draft)
+                TextField("默认", text: $draft)
                     .multilineTextAlignment(.trailing)
                     .keyboardType(option.kind == .int ? .numbersAndPunctuation : .default)
                     .textInputAutocapitalization(.never).autocorrectionDisabled()
@@ -177,8 +177,8 @@ struct ConfigOptionRow: View {
                     .frame(maxWidth: 170)
             }
             .onAppear { draft = value ?? "" }
-            .onChange(of: value) { _, v in if !editing { draft = v ?? "" } }
-            .onChange(of: editing) { _, on in if !on, draft != (value ?? "") { value = draft } }
+            .onChange(of: value) { v in if !editing { draft = v ?? "" } }
+            .onChange(of: editing) { on in if !on, draft != (value ?? "") { value = draft } }
         }
     }
 }
@@ -225,6 +225,6 @@ struct SettingsSearchResults: View {
                 Text("Most options are read when Madeira starts: close it from the app switcher after a change.")
             }
         }
-        .onChange(of: refresh) { _, _ in values = MadeiraConfig.all() }
+        .onChange(of: refresh) { _ in values = MadeiraConfig.all() }
     }
 }
