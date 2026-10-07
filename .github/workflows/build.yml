@@ -83,6 +83,7 @@ jobs:
             -DLLVM_INCLUDE_TESTS=Off -DLLVM_ENABLE_ZLIB=Off \
             -DLLVM_ENABLE_BENCHMARKS=Off -DLLVM_INCLUDE_BENCHMARKS=Off \
             -DLLVM_ENABLE_BINDINGS=Off -DLLVM_ENABLE_ZSTD=Off \
+            -DLLVM_NATIVE_BUILD="$PWD/toolchains/llvm-host-build" \
             -DCROSS_TOOLCHAIN_FLAGS_NATIVE="-DCMAKE_C_COMPILER=clang;-DCMAKE_CXX_COMPILER=clang++;-DCMAKE_ASM_COMPILER=clang"
           cmake --build toolchains/llvm-ios-build -j"$(sysctl -n hw.ncpu)" 2>&1 | tail -40
 
