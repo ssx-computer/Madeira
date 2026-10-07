@@ -1,0 +1,229 @@
+name: Build Madeira
+
+# Builds the full Madeira IPA on GitHub's macOS runners:
+#   Job 1 compiles LLVM for iOS (the DXMT shader compiler's dependency) and
+#          caches it — slow the first run, cached afterwards.
+#   Job 2 builds every component (GnuTLS, FFmpeg, FEX, Wine, DXMT, the
+#          native D3D12 runtime, Madeira Dock) and the iOS app, then packs a
+#          ldid-signed IPA with the app's entitlements (TrollStore installs
+#          it directly; SideStore users re-sign with their own Apple ID).
+#
+# Submodules point at Madeira's own forks (github.com/willfaust), whose
+# branches are pushed — a plain recursive clone works.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'app/**'
+      - 'build/**'
+      - 'madeira-d3d12/**'
+      - 'tools/**'
+      - '.github/workflows/**'
+
+permissions:
+  contents: read
+
+env:
+  LLVM_COMMIT: 8dfdcc7b7bfe7cd059f5a08e29e2e39cd62a53a5
+  LLVM_MINGW_URL: https://github.com/mstorsjo/llvm-mingw/releases/download/20260421/llvm-mingw-20260421-ucrt-macos-universal.tar.xz
+  LLVM_MINGW_SHA256: bd85a3975723815cef28dbbd2ca2cb0c926f6b348a12a0453f39f7af273cb3f7
+
+jobs:
+  llvm-ios:
+    name: LLVM for iOS (cached)
+    runs-on: macos-15
+    timeout-minutes: 350
+    steps:
+      - name: Checkout (no submodules needed)
+        uses: actions/checkout@v4
+
+      - name: Cache LLVM builds
+        id: llvmcache
+        uses: actions/cache@v4
+        with:
+          path: |
+            toolchains/llvm-ios-build
+            toolchains/llvm-host-build
+          key: llvm-ios-${{ env.LLVM_COMMIT }}-v1
+
+      - name: Fetch llvm-project at the pinned commit
+        if: steps.llvmcache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p toolchains/llvm-project
+          cd toolchains/llvm-project
+          git init -q
+          git remote add origin https://github.com/llvm/llvm-project.git
+          git fetch --depth 1 origin "$LLVM_COMMIT"
+          git checkout -q FETCH_HEAD
+
+      - name: Build the host tablegen
+        if: steps.llvmcache.outputs.cache-hit != 'true'
+        run: |
+          sysctl -n hw.ncpu
+          cmake -S toolchains/llvm-project/llvm -B toolchains/llvm-host-build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_TARGETS_TO_BUILD=host -DLLVM_BUILD_TOOLS=Off \
+            -DLLVM_INCLUDE_TESTS=Off -DLLVM_ENABLE_ZLIB=Off
+          cmake --build toolchains/llvm-host-build --target llvm-tblgen -j"$(sysctl -n hw.ncpu)"
+
+      - name: Build LLVM for iOS (all libraries)
+        if: steps.llvmcache.outputs.cache-hit != 'true'
+        run: |
+          cmake -S toolchains/llvm-project/llvm -B toolchains/llvm-ios-build \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_SYSROOT=iphoneos \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_HOST_TRIPLE=arm64-apple-ios15.0 \
+            -DLLVM_DEFAULT_TARGET_TRIPLE=arm64-apple-ios15.0 \
+            -DLLVM_TARGET_ARCH=host -DLLVM_TARGETS_TO_BUILD= \
+            -DLLVM_ENABLE_PROJECTS= -DLLVM_BUILD_TOOLS=Off \
+            -DLLVM_INCLUDE_TESTS=Off -DLLVM_ENABLE_ZLIB=Off \
+            -DCROSS_TOOLCHAIN_FLAGS_NATIVE="-DCMAKE_C_COMPILER=clang;-DCMAKE_CXX_COMPILER=clang++;-DCMAKE_ASM_COMPILER=clang"
+          cmake --build toolchains/llvm-ios-build -j"$(sysctl -n hw.ncpu)"
+
+  build:
+    name: Madeira IPA
+    needs: llvm-ios
+    runs-on: macos-15
+    timeout-minutes: 350
+    steps:
+      - name: Checkout with submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Restore LLVM cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            toolchains/llvm-ios-build
+            toolchains/llvm-host-build
+          key: llvm-ios-${{ env.LLVM_COMMIT }}-v1
+          fail-on-cache-miss: true
+
+      - name: Install tools
+        run: |
+          brew install ldid sevenzip
+          pip3 install meson ninja
+
+      - name: Download llvm-mingw toolchain
+        run: |
+          mkdir -p toolchains
+          cd toolchains
+          curl -fL -o llvm-mingw.tar.xz "$LLVM_MINGW_URL"
+          echo "$LLVM_MINGW_SHA256  llvm-mingw.tar.xz" | shasum -a 256 -c -
+          tar -xf llvm-mingw.tar.xz
+          rm llvm-mingw.tar.xz
+          ls -d llvm-mingw-*
+
+      - name: Microsoft VC++ runtime (x86_64-vcruntime)
+        run: |
+          # Twelve MSVC runtime DLLs are expected in app/Madeira/x86_64-vcruntime/
+          # (see tools/fetch-vcruntime.md). Extracted unmodified from Microsoft's
+          # official redistributable; a failure here is not fatal — only games
+          # that link the runtime need them.
+          set +e
+          curl -fL -o /tmp/VC_redist.x64.exe https://aka.ms/vs/17/release/vc_redist.x64.exe
+          7zz x /tmp/VC_redist.x64.exe -o/tmp/vcredist >/dev/null
+          mkdir -p app/Madeira/x86_64-vcruntime
+          7zz x "/tmp/vcredist/.rsrc/1033/CABINET/"*.cab -oapp/Madeira/x86_64-vcruntime >/dev/null
+          ls app/Madeira/x86_64-vcruntime | head -20
+
+      - name: GnuTLS stack (GMP, nettle, GnuTLS)
+        run: bash build/gnutls-ios/build.sh
+
+      - name: FFmpeg (LGPL-only configuration)
+        run: bash build/ffmpeg/build.sh
+
+      - name: FEX (iOS static libraries)
+        run: bash build/fex-ios/build.sh
+
+      - name: FEX (ARM64EC module, xtajit64.dll)
+        run: bash build/fex-arm64ec/build.sh
+
+      - name: Wine (unix side)
+        run: |
+          bash build/ntdll-unix/build.sh
+          bash build/wineserver/build.sh
+          bash build/win32u-unix/build.sh
+
+      - name: Wine (ARM64EC PE side)
+        run: |
+          bash build/wine-pe/build-ntdll.sh
+          bash build/wine-pe/build-modules.sh
+
+      - name: DXMT (unix side, needs the LLVM cache)
+        run: bash build/dxmt-ios/build.sh
+
+      - name: DXMT (ARM64EC PE side, meson)
+        run: |
+          meson setup dxmt/build-arm64ec dxmt -Dbuildtype=release \
+            -Dwine_build_path=../../wine/build-arm64ec --cross-file=dxmt/build-arm64ec-win.txt
+          ninja -C dxmt/build-arm64ec src/winemetal/winemetal.dll
+          ninja -C dxmt/build-arm64ec src/winemetal/d3d11.dll
+          cp dxmt/build-arm64ec/src/winemetal/winemetal.dll app/Madeira/arm64ec-windows/
+          cp dxmt/build-arm64ec/src/winemetal/d3d11.dll app/Madeira/arm64ec-windows/
+
+      - name: In-app pairing (Rust, libmadeira_rppairing.a)
+        run: |
+          rustup target add aarch64-apple-ios
+          bash build/rppairing-ios/build.sh
+
+      - name: Native D3D12 runtime (ARM64EC)
+        run: bash build/madeira-d3d12/build-pe.sh
+
+      - name: Madeira Dock (dockhost.exe)
+        run: bash build/madeira-dock/build.sh
+
+      - name: Stage licences
+        run: bash build/stage-licenses.sh
+
+      - name: Build the app (unsigned, Debug runs the games)
+        run: |
+          xcodebuild -project app/Madeira.xcodeproj -scheme Madeira \
+            -destination 'generic/platform=iOS' -configuration Debug \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            -allowProvisioningUpdates build 2>&1 | tail -60
+
+      - name: Locate the built app
+        id: app
+        run: |
+          APP=$(find ~/Library/Developer/Xcode/DerivedData -name "Madeira.app" -path "*iphoneos*" -type d | head -1)
+          echo "app=$APP" >> "$GITHUB_OUTPUT"
+          echo "Found: $APP"
+
+      - name: Inject entitlements (ldid) and pack the IPA
+        run: |
+          APP="${{ steps.app.outputs.app }}"
+          # ldid signs with the app's own entitlements; TrollStore reads them at
+          # install, SideStore users keep them by re-signing with their Apple ID.
+          ldid -Sapp/Madeira/Madeira.entitlements "$APP/Madeira"
+          if [ -f "$APP/PlugIns/MadeiraJITHelper.appex/MadeiraJITHelper" ]; then
+            ldid -Sapp/Madeira/Madeira.entitlements "$APP/PlugIns/MadeiraJITHelper.appex/MadeiraJITHelper"
+          fi
+          rm -rf Payload
+          mkdir Payload
+          cp -R "$APP" Payload/Madeira.app
+          zip -qry Madeira-ios15-unsigned.ipa Payload
+          ls -lh Madeira-ios15-unsigned.ipa
+
+      - name: Upload the IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Madeira-ios15-unsigned-ipa
+          path: Madeira-ios15-unsigned.ipa
+          if-no-files-found: error
+
+      - name: Upload the build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: madeira-build-log
+          path: |
+            app/Madeira/**/obj/*.err
+            build/**/*.log
+          if-no-files-found: ignore
