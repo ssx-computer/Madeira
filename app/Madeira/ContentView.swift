@@ -487,8 +487,12 @@ final class MetalBackedView: UIView {
     // follow via winios_pointer / winios_cursor_move.
     // ==================================================================
     // Internal, not private: a hardware mouse moves the same desktop cursor
-    // (HardwareInput.followDesktopCursor).
-    static var cursor = CGPoint(x: 480, y: 270)
+    // (HardwareInput.followDesktopCursor). ml1157: it starts at the centre of
+    // whatever desktop size was launched (static, so it is first read at the
+    // first use -- after MADEIRA_SCREEN_* are set).
+    static var cursor = CGPoint(
+        x: CGFloat(getenv("MADEIRA_SCREEN_W").flatMap { Int(String(cString: $0)) } ?? 960) / 2,
+        y: CGFloat(getenv("MADEIRA_SCREEN_H").flatMap { Int(String(cString: $0)) } ?? 540) / 2)
     private var lastPanPoint = CGPoint.zero
     private var touchStartPoint = CGPoint.zero
     private var touchStartTime: TimeInterval = 0
@@ -1244,9 +1248,8 @@ struct ContentView: View {
     @State private var debuggerAttached = isDebuggerAttached()
     @ObservedObject private var input = InputSettings.shared
     @State private var pointerPanel = false
+    @State private var desktopSizeTick = 0   // ml1157: bumps after a Resolution pick
     @Namespace private var pointerNS
-    /// .compact = iPhone landscape: game surface expands, arrow keys appear.
-    @Environment(\.verticalSizeClass) private var vSizeClass
     /// The library front end (Library.swift). When it is the chosen interface it
     /// replaces both bodies below, and a running library session gets the
     /// full-screen `sessionBody`.
@@ -1270,46 +1273,38 @@ struct ContentView: View {
          * NavigationStack is single-column on every device. Safe here: there are
          * no NavigationLinks anywhere in the app, so nothing depended on the
          * two-column selection behaviour. */
-        NavigationStack {
+        CompatNavigationStack {
             Group {
                 if library.enabled && library.current != nil {
                     sessionBody
+                        .navigationBarHidden(true)
                 } else if library.enabled {
                     LibraryView(play: launchLibraryEntry, enableJIT: enableJIT,
                                 startDock: { startDock($0, compactPool: $1) })
-                } else if vSizeClass == .compact {
-                    landscapeBody
                 } else {
-                    portraitBody
+                    developerBody
                 }
             }
-            // Rotation destroys/recreates the UIViewRepresentable across
-            // this if/else (two SwiftUI identities) — HARMLESS since
-            // 2026-07-05: MetalHostView is a process-lifetime singleton;
-            // a fresh placeholder only re-parents the same CAMetalLayer.
             .navigationTitle("Madeira")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(.regularMaterial, for: .navigationBar)
             // The library keeps a material bar only before iOS 26. From iOS 26 the
             // system draws its soft scroll edge effect instead: content scrolls
             // under the title, the buttons and the search field behind a
             // progressive blur (as in the App Store), with no hard edge.
-            .toolbarBackground(library.enabled && !Self.systemScrollEdge ? .visible : .automatic, for: .navigationBar)
-            .navigationBarHidden(library.enabled ? library.current != nil : vSizeClass == .compact)
             // A second session cannot start in this process; offer to close Madeira.
-            .alert("Restart Madeira", isPresented: Binding(get: { library.restartNotice != nil },
+            .alert("重启 Madeira", isPresented: Binding(get: { library.restartNotice != nil },
                                                             set: { if !$0 { library.restartNotice = nil } })) {
                 Button("Close Madeira") {
                     LogStore.shared.log("[session-once] closed by the user for a restart")
                     exit(0)
                 }
-                Button("Later", role: .cancel) { library.restartNotice = nil }
+                Button("稍后", role: .cancel) { library.restartNotice = nil }
             } message: { Text(library.restartNotice ?? "") }
             // CS_DEBUGGED without a debugger (JIT enabled outside Madeira): offer Madeira's own request.
-            .alert("Enable JIT", isPresented: Binding(get: { library.jitNotice != nil },
+            .alert("启用 JIT", isPresented: Binding(get: { library.jitNotice != nil },
                                                       set: { if !$0 { library.jitNotice = nil } })) {
-                Button("Enable JIT") { library.jitNotice = nil; enableJIT() }
-                Button("Later", role: .cancel) { library.jitNotice = nil }
+                Button("启用 JIT") { library.jitNotice = nil; enableJIT() }
+                Button("稍后", role: .cancel) { library.jitNotice = nil }
             } message: { Text(library.jitNotice ?? "") }
             .sheet(isPresented: $jitCoordinator.showSetup) { JITSetupView() }
             // A Steam game's saves may not be the latest (cloudClear).
@@ -1318,7 +1313,7 @@ struct ContentView: View {
                 if let notice = library.cloudNotice {
                     switch notice.kind {
                     case .syncing: Button("Wait and sync") { library.cloudNotice = nil; cloudWait(notice.appID) }
-                    case .unchecked: Button("Try again") { library.cloudNotice = nil; cloudWait(notice.appID) }
+                    case .unchecked: Button("重试") { library.cloudNotice = nil; cloudWait(notice.appID) }
                     case .conflict:
                         Button("Choose") {
                             library.cloudNotice = nil; library.cloudRetry = nil
@@ -1330,7 +1325,7 @@ struct ContentView: View {
                         library.cloudNotice = nil; library.cloudBypass = notice.appID
                         let retry = library.cloudRetry; library.cloudRetry = nil; retry?()
                     }
-                    Button("Cancel", role: .cancel) { library.cloudNotice = nil; library.cloudRetry = nil }
+                    Button("取消", role: .cancel) { library.cloudNotice = nil; library.cloudRetry = nil }
                 }
             } message: { Text(library.cloudNotice?.message ?? "") }
             .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
@@ -1343,6 +1338,7 @@ struct ContentView: View {
                 logEntitlementStatus()
                 logStore.log("[build] \(BuildStamp.text)")
                 DeviceDiagnostics.logStartup()
+                DockOffline.begin()
                 FrontendChoice.logStartup()
                 DeviceLoadDiagnostics.start()
                 // Madeira Dock: an unconsumed sign-in transfer from an earlier run goes.
@@ -1354,8 +1350,39 @@ struct ContentView: View {
             // A Home Screen shortcut (madeira://play?exe=...) starts its library entry,
             // now or, from a cold start, once the library is up.
             .onReceive(ShortcutRouter.shared.$pendingExe) { _ in launchPendingShortcut() }
-            .onChange(of: library.enabled) { _, _ in launchPendingShortcut() }
+            .onChange(of: library.enabled) { _ in launchPendingShortcut() }
         }
+    }
+
+    /// The developer interface. Orientation comes from the view's own shape, not
+    /// verticalSizeClass: iPad is .regular in BOTH orientations, so the size-class
+    /// test kept the portrait tooling (badges, buttons, log) on screen after
+    /// rotating. On iPad the keyboard is excluded from the measurement, otherwise
+    /// raising it in portrait would make the view wider than tall; an iPhone's
+    /// keyboard never does, so there the portrait layout still makes room for it.
+    private var developerBody: some View {
+        GeometryReader { geo in
+            let landscape = geo.size.width > geo.size.height
+            Group {
+                if landscape {
+                    landscapeBody
+                } else {
+                    portraitBody
+                }
+            }
+            .frame(width: geo.size.width, height: geo.size.height)
+            // Rotation destroys/recreates the UIViewRepresentable across
+            // this if/else (two SwiftUI identities) — HARMLESS since
+            // 2026-07-05: MetalHostView is a process-lifetime singleton;
+            // a fresh placeholder only re-parents the same CAMetalLayer.
+            .navigationBarHidden(landscape)
+            // ml1157: landscape is the desktop, edge to edge -- no status bar
+            // over its top rows, and the home indicator fades out.
+            .statusBarHidden(landscape)
+            // The landscape controls window re-frames to the rotated scene.
+            .onChange(of: landscape) { _ in TouchControlsHost.attach() }
+        }
+        .ignoresSafeArea(UIDevice.current.userInterfaceIdiom == .pad ? .keyboard : [])
     }
 
     /// A library session: the game full screen in either orientation, with the
@@ -1459,6 +1486,10 @@ struct ContentView: View {
             ZStack {
                 Color.black
                 MadeiraMetalView()
+                    // A launch straight into landscape never shows the portrait
+                    // layout, which is otherwise what creates the controls window
+                    // (its top bar carries the keyboard button here).
+                    .onAppear { TouchControlsHost.attach() }
                 // Controls removed for now (ml586): game-only landscape.
                 // The FPS readout stays, pinned in the right pillarbox bar —
                 // the window-level surface covers anything drawn over the
@@ -1571,7 +1602,7 @@ struct ContentView: View {
             // Device model rides in this row (the old standalone statusHeader
             // row above it spent ~50pt of vertical space on nothing else).
             VStack(alignment: .trailing, spacing: 0) {
-                Text("Device")
+                Text("设备")
                     .font(.caption2)
                     .foregroundColor(.secondary)
                 Text(deviceInfo)
@@ -1629,21 +1660,21 @@ struct ContentView: View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 12) {
                 if SteamSignIn.isEnabled {
-                    Button("Steam sign-in") { devSheet = .steamSignIn }
+                    Button("Steam 登录") { devSheet = .steamSignIn }
                         .buttonStyle(.bordered)
                 }
                 if MadeiraDock.enabled {
                     Button("Madeira Dock") { devSheet = .dock }
                         .buttonStyle(.bordered)
                 }
-                Button("All settings") { devSheet = .allSettings }
+                Button("全部设置") { devSheet = .allSettings }
                     .buttonStyle(.bordered)
-                Button("Enable JIT") {
+                Button("启用 JIT") {
                     enableJIT()
                 }
                 .buttonStyle(.borderedProminent)
 
-                Button("Steam Testing") {
+                Button("Steam 测试中") {
                     // Steam S3 first boot: virtual desktop (Steam needs a
                     // window manager) + services.exe (SCM → rpcss for Steam's
                     // COM, the chain proven in the rpcss milestone) + steam.exe
@@ -1912,6 +1943,8 @@ struct ContentView: View {
                 .buttonStyle(.borderedProminent)
                 .tint(.green)
 
+                resolutionPicker
+
                 Button("Wine Virtual Desktop") {
                     // S3-pre R2v2: raw rpcss.exe CANNOT run standalone —
                     // its wmain unconditionally StartServiceCtrlDispatcherW's
@@ -1931,12 +1964,11 @@ struct ContentView: View {
                     // Known risk: if shellwindows_init beats services.exe's
                     // RPC_Init, OpenSCManager fails → watch whether that
                     // fails fast or hits the RaiseException→CS wedge again.
-                    // ml1127: `desktop-size = WxH` in madeira.cfg; 960x540 otherwise.
-                    var deskW = 960, deskH = 540
-                    if let txt = MadeiraConfig.get("desktop-size") {
-                        let p = txt.lowercased().split(separator: "x").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
-                        if p.count == 2, p[0] >= 640, p[1] >= 360, p[0] <= 3840, p[1] <= 2160 { deskW = p[0]; deskH = p[1] }
-                    }
+                    // ml1127: `desktop-size = WxH` in madeira.cfg (the Resolution
+                    // menu writes it). ml1157/ml1172: otherwise the screen's own
+                    // shape (ResolutionChoices), so the desktop fills a landscape
+                    // screen with no bars.
+                    let (deskW, deskH) = configuredDesktopSize(default: ResolutionChoices.defaultSize())
                     setenv("MADEIRA_EXE", "explorer.exe", 1)
                     setenv("MADEIRA_ARGS",
                            "/desktop=shell,\(deskW)x\(deskH) C:\\windows\\system32\\services.exe", 1)
@@ -2103,8 +2135,8 @@ struct ContentView: View {
             }
             .padding()
         }
-        .alert("Restart Madeira", isPresented: $showFrontendRestart) {
-            Button("OK", role: .cancel) {}
+        .alert("重启 Madeira", isPresented: $showFrontendRestart) {
+            Button("好", role: .cancel) {}
         } message: {
             Text("Close Madeira from the app switcher and open it again to use the new interface.")
         }
@@ -2320,6 +2352,16 @@ struct ContentView: View {
     }
 
     private func enableJIT() {
+        // Native JIT (jailbreak / TrollStore): the kernel already grants
+        // executable memory, no debugger is needed, and the JIT pool maps
+        // natively at FEX start (jit_pool_init, native path first). Report
+        // success without the debugger flow.
+        if canJitNatively() {
+            jitStatus = .available
+            logStore.log("JIT is available natively (\(nativeJITKindName())): no debugger needed.", level: .success)
+            launchAfterJITEnded(started: true)
+            return
+        }
         // Explains why JIT cannot be enabled on a copy signed without get-task-allow; 0 opens StikDebug regardless.
         // A debugger can attach only to a process whose signature carries
         // get-task-allow (a development signature). A copy signed with a
@@ -2358,13 +2400,14 @@ struct ContentView: View {
     }
 
     /// Enable JIT finished: a Play that waited for it starts its game, only when the
-    /// debugger is attached (so the start cannot ask for JIT again) and nothing else
-    /// started meanwhile. A failure drops it: a later Enable JIT starts no game.
+    /// debugger is attached (so the start cannot ask for JIT again) or native JIT
+    /// is available (jailbreak / TrollStore: no debugger, and nothing else started
+    /// meanwhile). A failure drops it: a later Enable JIT starts no game.
     private func launchAfterJITEnded(started: Bool) {
         guard let launch = launchAfterJIT else { return }
         launchAfterJIT = nil
         library.startingJIT = nil
-        guard started, StikJITHelper.ready, library.current == nil, wine_process_is_running() == 0 else {
+        guard started, StikJITHelper.ready || canJitNatively(), library.current == nil, wine_process_is_running() == 0 else {
             logStore.log("[jit-on-play] JIT did not come on: the game was not started")
             // A failure has its own error; this one closes the details page as well.
             if started, library.current == nil { library.error = "JIT is on, but the game could not start. Tap Play again." }
@@ -2382,6 +2425,10 @@ struct ContentView: View {
     /// Madeira's Enable JIT instead of starting a launch that cannot get its pool.
     private func jitReadyForLaunch(inLibrary: Bool, entry: UUID? = nil, then launch: (() -> Void)? = nil) -> Bool {
         if StikJITHelper.ready { return true }
+        // Native JIT (jailbreak / TrollStore): the JIT pool maps without a
+        // debugger at FEX start (jit_pool_init, native path first), so a
+        // launch may start right away.
+        if canJitNatively() { return true }
         if inLibrary, let launch {
             logStore.log("[jit-on-play] JIT is not on: enabling it, then starting the game")
             launchAfterJIT = launch
@@ -3252,6 +3299,16 @@ struct ContentView: View {
         // is handed to Valve's client, and it stays off until the Dock session has ended
         // (SteamOwnedLibrary.prepareDock / dockEnded, SteamConnectionGate).
         Task { @MainActor in
+            // Resolve the original config.launch key before closing the native connection.
+            // A filtered launch array can start at 1 (or have gaps); its offset is not the key.
+            // Without a choice (no configuration to be had, or no entry whose .exe is on disk:
+            // a launcher started through a .bat, say) it is key 0, which every Dock start
+            // used before; Dock stops at once if Steam names that entry missing.
+            let options = await SteamOwnedLibrary.shared.launchOptions(appID: game.id)
+            let installFolder = MadeiraDock.drive.appendingPathComponent(game.library + "/common/" + game.installDir)
+            let chosen = options.flatMap { SteamDirectStart.choose($0, installFolder: installFolder)?.launchIndex }
+            let launchOption = chosen ?? 0
+            LogStore.shared.log("[madeira-dock] launch option \(launchOption)\(chosen == nil ? " (none chosen: the default)" : "")")
             await SteamOwnedLibrary.shared.prepareDock()
             do {
                 // The launch state may have changed while the connection closed.
@@ -3264,7 +3321,7 @@ struct ContentView: View {
                 }
                 try MadeiraDock.writeHandoff(account: signIn.accountName, token: signIn.refreshToken, appID: game.id)
             } catch { fail(error); return }
-            MadeiraDock.configure(game)
+            MadeiraDock.configure(game, launchOption: launchOption)
             // The game's one-time installs (its Steam install script) run first, in the same
             // session. No session runs yet, so the registry files can be read and written.
             DockInstallers.prepare(game, drive: MadeiraDock.drive, prefix: MadeiraDock.prefix)
@@ -3286,7 +3343,11 @@ struct ContentView: View {
             // is unchanged; env.MADEIRA_GDI_SHARED_SECTION = 0 in madeira.cfg, exported after
             // this, keeps the default for Dock sessions too.
             setenv("MADEIRA_GDI_SHARED_SECTION", "1", 1)
-            var width = 1280, height = 720
+            // ml1185: without desktop-size or a game's Resolution, this screen's shape
+            // (ml1172's default: 1408x648 on a 19.5:9 iPhone, 1152x800 on an 11-inch
+            // iPad), as every library entry defaults to; a fixed 1280x720 left bars
+            // above and below on an iPad.
+            var (width, height) = ResolutionChoices.defaultSize()
             if let txt = MadeiraConfig.get("desktop-size") {
                 let p = txt.lowercased().split(separator: "x").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
                 if p.count == 2, p[0] >= 640, p[1] >= 360, p[0] <= 3840, p[1] <= 2160 { width = p[0]; height = p[1] }
@@ -3369,6 +3430,44 @@ struct ContentView: View {
         }
         logStore.log("Steam found at \(winDir)", level: .success)
         return true
+    }
+
+    /// ml1127: `desktop-size = WxH` from madeira.cfg, or `def` when absent or out of range.
+    /// ml1157: the desktop resolution menu. Saves `desktop-size` to madeira.cfg;
+    /// Wine reads it once per app launch, so while it runs the choice waits for
+    /// the next launch (the label says so).
+    /// ml1172: the choices are the library's (ResolutionChoices), grouped.
+    private var resolutionPicker: some View {
+        let _ = desktopSizeTick   // re-read the file after a pick
+        let (cw, ch) = configuredDesktopSize(default: ResolutionChoices.defaultSize())
+        let groups = ResolutionChoices.groups()
+        let custom = ResolutionChoices.extra("\(cw)x\(ch)", in: groups, note: "madeira.cfg")
+        let pending = wine_process_is_running() != 0
+        let pick = { (p: ResolutionChoices.Choice) in
+            Button {
+                MadeiraConfig.set("desktop-size", p.value)
+                desktopSizeTick += 1
+            } label: {
+                if p.w == cw && p.h == ch { Label(p.label, systemImage: "checkmark") } else { Text(p.label) }
+            }
+        }
+        return Menu {
+            ForEach(groups, id: \.title) { group in
+                Section(group.title) { ForEach(group.choices, id: \.value) { pick($0) } }
+            }
+            if let custom { pick(custom) }
+        } label: {
+            Label("\(cw)×\(ch)" + (pending ? " · next launch" : ""), systemImage: "rectangle.dashed")
+        }
+        .buttonStyle(.bordered)
+    }
+
+    private func configuredDesktopSize(default def: (Int, Int)) -> (Int, Int) {
+        if let txt = MadeiraConfig.get("desktop-size") {
+            let p = txt.lowercased().split(separator: "x").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
+            if p.count == 2, p[0] >= 640, p[1] >= 360, p[0] <= 3840, p[1] <= 2160 { return (p[0], p[1]) }
+        }
+        return def
     }
 
     private func startWineserver() {
@@ -3458,7 +3557,7 @@ struct SetupGuideView: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        NavigationStack {   /* ml658: see the note on the main body */
+        CompatNavigationStack {   /* ml658: see the note on the main body */
             List {
                 Section("Requirements") {
                     guideRow(
@@ -3487,7 +3586,7 @@ struct SetupGuideView: View {
                 }
 
                 Section("About") {
-                    Text("Madeira is a proof-of-concept for running x86 Windows games on iOS using FEX-Emu, Wine, and Metal-based graphics translation.")
+                    Text("Madeira 是一个概念验证项目：在 iOS 上用 FEX-Emu、Wine 和基于 Metal 的图形翻译运行 x86 Windows 游戏。")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -3496,7 +3595,7 @@ struct SetupGuideView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("Done") { dismiss() }
+                    Button("完成") { dismiss() }
                 }
             }
         }
@@ -3768,10 +3867,11 @@ final class TouchControlsModel: ObservableObject {
     /// `topBar: false` in a library session, where LibraryHUD replaces the bar.
     func hitsInteractive(_ p: CGPoint, in bounds: CGRect, topBar: Bool = true) -> Bool {
         // Top bar: two 44pt buttons 10pt apart in play mode, centred, 10pt down,
-        // plus the layout menu while touch controls are on (ml1970).
+        // plus the layout menu while touch controls are on (ml1970), plus the
+        // keyboard button.
         // Padded generously; a few points of slop costs nothing and a missed tap
         // costs a build.
-        let buttons: CGFloat = TouchControlsOverlay.showsLayoutMenu(self) ? 3 : 2
+        let buttons: CGFloat = (TouchControlsOverlay.showsLayoutMenu(self) ? 3 : 2) + 1
         let barW: CGFloat = buttons * 44 + (buttons - 1) * 10
         if topBar, CGRect(x: bounds.midX - barW / 2 - 10, y: 0,
                           width: barW + 20, height: 68).contains(p) { return true }
@@ -3880,11 +3980,11 @@ struct TouchControlsOverlay: View {
             .contentShape(Rectangle())
             .gesture(scalePinch, including: m.editing ? .all : .subviews)
             .onAppear { applyDefaultLayout(geo); configureGamepad(landscape: landscape) }
-            .onChange(of: geo.size) { _, _ in applyDefaultLayout(geo); configureGamepad(landscape: landscape) }
-            .onChange(of: m.controls) { _, _ in configureGamepad(landscape: landscape) }
-            .onChange(of: m.visible) { _, _ in configureGamepad(landscape: landscape) }
-            .onChange(of: m.editing) { _, _ in configureGamepad(landscape: landscape) }
-            .onChange(of: library.blocksGameplayTouch) { _, _ in configureGamepad(landscape: landscape) }
+            .onChange(of: geo.size) { _ in applyDefaultLayout(geo); configureGamepad(landscape: landscape) }
+            .onChange(of: m.controls) { _ in configureGamepad(landscape: landscape) }
+            .onChange(of: m.visible) { _ in configureGamepad(landscape: landscape) }
+            .onChange(of: m.editing) { _ in configureGamepad(landscape: landscape) }
+            .onChange(of: library.blocksGameplayTouch) { _ in configureGamepad(landscape: landscape) }
             .onDisappear { GamepadInput.shared.configureTouch(controls: []); TouchMouseGate.padOverlay = false }
         }
         .ignoresSafeArea()
@@ -3913,10 +4013,13 @@ struct TouchControlsOverlay: View {
     }
 
     private func configureGamepad(landscape: Bool) {
-        let ids = landscape && m.visible && !m.editing && !library.blocksGameplayTouch
+        let ids = landscape && m.visible
             ? m.controls.filter { $0.action.padName.map(TouchPadAction.supported) ?? false }.map(\.id) : []
-        GamepadInput.shared.configureTouch(controls: Set(ids))
-        TouchMouseGate.padOverlay = !ids.isEmpty
+        // Menus and the control editor keep the pad connected but take no input (#204);
+        // a touch that misses the controls is no mouse only while they do (#150).
+        let accepting = !m.editing && !library.blocksGameplayTouch
+        GamepadInput.shared.configureTouch(controls: Set(ids), acceptingInput: accepting)
+        TouchMouseGate.padOverlay = accepting && !ids.isEmpty
     }
 
     /// ml1970: with MADEIRA_CONTROLS_XBOX_DEFAULT=1, a user with no controls file gets the built-in controller
@@ -3950,7 +4053,7 @@ struct TouchControlsOverlay: View {
                         m.editing = false
                     }
                 } label: {
-                    Text("Done")
+                    Text("完成")
                         .font(.system(size: 16, weight: .semibold))
                         .foregroundStyle(.white)
                         .padding(.horizontal, 18)
@@ -3960,6 +4063,8 @@ struct TouchControlsOverlay: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("Done editing controls")
             } else {
+                // The iOS keyboard for the game, as ⌨ in the portrait key row.
+                glassButton("keyboard") { MetalBackedView.toggleKeyboard() }
                 glassButton("gamecontroller", dim: !m.visible) { m.visible.toggle() }
                 if Self.showsLayoutMenu(m) {
                     ControlLayoutMenu()
@@ -4212,8 +4317,8 @@ struct TouchControlButton: View {
             }
         }
         .onDisappear { if control.action.isPad { padVector = .zero; isDown = false } }
-        .onChange(of: m.editing) { _, _ in if control.action.isPad { padVector = .zero; isDown = false } }
-        .onChange(of: screen) { _, _ in if control.action.isPad { padVector = .zero; isDown = false } }
+        .onChange(of: m.editing) { _ in if control.action.isPad { padVector = .zero; isDown = false } }
+        .onChange(of: screen) { _ in if control.action.isPad { padVector = .zero; isDown = false } }
         .onChange(of: control.action) { old, new in
             if old.isPad || new.isPad { padVector = .zero; isDown = false }
         }
@@ -4443,7 +4548,7 @@ struct MappingPanel: View {
 
     private var controllerTab: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Controller controls feed XInput player 1. LS and RS are analogue sticks; "
+            Text("手柄控制对应 XInput 玩家 1。LS 和 RS 是摇杆；"
                  + "LT and RT are full-press triggers. Touch and physical controls can be used together.")
                 .font(.system(size: 11))
                 .foregroundStyle(.orange.opacity(0.95))
