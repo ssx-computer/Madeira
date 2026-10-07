@@ -10,20 +10,24 @@
 import Foundation
 
 /// Manages the authenticated Steam session: login, heartbeat, reconnection, message routing.
-@Observable
 @MainActor
-class SteamSession {
+class SteamSession: ObservableObject {
     // MARK: - Published State
 
-    private(set) var connectionState: SteamConnectionState = .disconnected
-    private(set) var steamID: UInt64 = 0
-    private(set) var accountName: String = ""
-    private(set) var personaName: String = ""
-    private(set) var cellID: UInt32 = 0
+    // ObservableObject + @Published (was @Observable, which needs iOS 17).
+    // Nothing here subscribes objectWillChange directly: the models that read
+    // this class (SteamOwnedLibrary, DepotDownloader) read plain values, and
+    // the views observe those models, so @Published costs nothing and keeps
+    // the same behaviour on iOS 15.
+    @Published private(set) var connectionState: SteamConnectionState = .disconnected
+    @Published private(set) var steamID: UInt64 = 0
+    @Published private(set) var accountName: String = ""
+    @Published private(set) var personaName: String = ""
+    @Published private(set) var cellID: UInt32 = 0
     /// While true the session neither connects nor reconnects: a game session
     /// runs, and Valve's own client must be the only one logged on with this
     /// account (see `suspend()`).
-    private(set) var isSuspended = false
+    @Published private(set) var isSuspended = false
 
     // MARK: - Internal State
 
