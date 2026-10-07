@@ -167,9 +167,10 @@ struct LibraryEntry: Codable, Identifiable {
     var arguments = ""
     /// The virtual monitor's size ("WxH"): the session default a game renders
     /// for (GuestDisplay.configureSessionDefault), and the Desktop entry's
-    /// desktop size. New entries default to 1408x648, a wide shape near the
-    /// phone's landscape aspect that most games render quickly.
-    var resolution = "1408x648"
+    /// desktop size. ml1172: new entries default to this screen's shape at
+    /// 1280x720's pixel count (ResolutionChoices: 1408x648 on a 19.5:9 iPhone,
+    /// as before, and 1152x800 on an 11-inch iPad, where a fixed 1408x648 left bars).
+    var resolution = ResolutionChoices.defaultValue
     /// How the monitor is scaled to the screen (DisplayMode raw value; nil = Fit).
     var display: String?
     /// FPS limit: 1 = 60, 3 = 30, 4 = 40, 0 = display maximum, 2 = uncapped (madeira_set_vsync_locked).
@@ -664,15 +665,36 @@ final class LibraryModel: ObservableObject {
 
     private init() {
         refreshFlag()
-        guard FileManager.default.fileExists(atPath: file.path) else { return }
-        do {
-            let doc = try JSONDecoder().decode(Document.self, from: Data(contentsOf: file))
-            guard doc.version == 1 else { throw LibraryError.message("This library uses a newer format.") }
-            entries = doc.entries
-        } catch {
-            readOnly = true
-            self.error = "Library could not be opened. The original file was preserved. " + error.localizedDescription
+        if FileManager.default.fileExists(atPath: file.path) {
+            do {
+                let doc = try JSONDecoder().decode(Document.self, from: Data(contentsOf: file))
+                guard doc.version == 1 else { throw LibraryError.message("This library uses a newer format.") }
+                entries = doc.entries
+            } catch {
+                readOnly = true
+                self.error = "Library could not be opened. The original file was preserved. " + error.localizedDescription
+            }
         }
+        resetPhoneResolution()
+    }
+
+    /// ml1172: every new entry used to get 1408x648, a 19.5:9 phone's shape.
+    /// On a screen of another shape (an iPad: a third of it black in Fit)
+    /// those entries are reset once to this device's default. Nothing tells a
+    /// deliberate 1408x648 from the old default, so a game set to it on purpose
+    /// is reset too; on a 19.5:9 iPhone nothing changes.
+    private func resetPhoneResolution() {
+        let key = "madeira.ml1172.resolution-reset"
+        guard !readOnly, !UserDefaults.standard.bool(forKey: key) else { return }
+        let phone = "1408x648"
+        let reset = ResolutionChoices.fills(1408, 648) ? 0 : entries.filter { $0.resolution == phone }.count
+        if reset > 0 {
+            var next = entries
+            for i in next.indices where next[i].resolution == phone { next[i].resolution = ResolutionChoices.defaultValue }
+            guard persist(next) else { return }   // try again at the next start
+        }
+        UserDefaults.standard.set(true, forKey: key)
+        LogStore.shared.log("[library] ml1172 resolution default \(ResolutionChoices.defaultValue); \(reset) entries reset from \(phone)")
     }
 
     func refreshFlag() {
@@ -734,13 +756,15 @@ final class LibraryModel: ObservableObject {
         guard entries.contains(where: { $0.steamAppID == appID }) else { return }
         persist(entries.filter { $0.steamAppID != appID })
     }
-    private func persist(_ next: [LibraryEntry]) {
-        guard !readOnly else { return }
+    @discardableResult
+    private func persist(_ next: [LibraryEntry]) -> Bool {
+        guard !readOnly else { return false }
         do {
             let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             try encoder.encode(Document(version: 1, entries: next)).write(to: file, options: .atomic)
             entries = next
-        } catch { self.error = "Could not save the library: " + error.localizedDescription }
+            return true
+        } catch { self.error = "Could not save the library: " + error.localizedDescription; return false }
     }
 
     /// Install size and graphics API, at most once a day per entry.
@@ -1252,9 +1276,9 @@ enum LibraryRendererBadge {
 struct LibraryLargeTitle: ToolbarContent {
     var body: some ToolbarContent {
         if #available(iOS 26.0, *) {
-            ToolbarItem(placement: .topBarLeading) { LibraryTitleText() }.sharedBackgroundVisibility(.hidden)
+            ToolbarItem(placement: .navigationBarLeading) { LibraryTitleText() }.sharedBackgroundVisibility(.hidden)
         } else {
-            ToolbarItem(placement: .topBarLeading) { LibraryTitleText() }
+            ToolbarItem(placement: .navigationBarLeading) { LibraryTitleText() }
         }
     }
 }
@@ -1274,7 +1298,6 @@ struct LibraryTitleText: View {
             Image(systemName: jit ? "bolt.fill" : "bolt")
                 .font(.system(size: LibraryHeaderAlignment.titleFont().pointSize * 0.53, weight: .thin))
                 .foregroundStyle(jit ? Color.accentColor : Color.primary)
-                .contentTransition(.symbolEffect(.replace))
                 .alignmentGuide(.firstTextBaseline) { d in d.height / 2 + LibraryHeaderAlignment.titleFont().capHeight / 2 }
                 .accessibilityLabel(jit ? "JIT enabled" : "JIT not enabled")
         }
@@ -1511,7 +1534,11 @@ struct LibraryNavSearch: UIViewControllerRepresentable {
             owner = target
             let item = target.navigationItem
             if item.searchController !== c.controller { item.searchController = c.controller }
-            if item.preferredSearchBarPlacement != .stacked { item.preferredSearchBarPlacement = .stacked }
+            // preferredSearchBarPlacement (and its enum) is iOS 17+; on iOS 15
+            // stacked is already the default, so the fix below is skipped.
+            if #available(iOS 17.0, *) {
+                if item.preferredSearchBarPlacement != .stacked { item.preferredSearchBarPlacement = .stacked }
+            }
             if item.hidesSearchBarWhenScrolling { item.hidesSearchBarWhenScrolling = false }
             // iOS 26 otherwise moves it to the bottom of an iPhone screen, beside the tab bar.
             if #available(iOS 26.0, *), item.searchBarPlacementAllowsToolbarIntegration {
@@ -2033,7 +2060,7 @@ struct LibraryStatus: View {
             badge("JIT", jit)
             badge("Memory+", memory)
             if jit && memory {
-                Text("Ready to play").font(.footnote.weight(.semibold)).foregroundStyle(.secondary)
+                Text("准备就绪").font(.footnote.weight(.semibold)).foregroundStyle(.secondary)
                     .padding(.leading, 4)
             }
         }
@@ -2290,7 +2317,7 @@ struct LibraryGroupedGames<LocalCell: View>: View {
         VStack(alignment: .leading, spacing: 24) {
             if groups.isEmpty {
                 if search.isEmpty {
-                    ContentUnavailableView("Make yourself at home", systemImage: "gamecontroller", description: Text("Copy a game's folder into Madeira › wine › drive_c with the Files app, then tap + and choose its .exe."))
+                    CompatContentUnavailableView("Make yourself at home", systemImage: "gamecontroller", description: Text("用「文件」App 把游戏文件夹复制到 Madeira › wine › drive_c，然后点 + 并选择它的 .exe。"))
                 } else {
                     Text("No games match your search.").foregroundStyle(.secondary)
                 }
@@ -2315,7 +2342,7 @@ struct LibraryGroupedGames<LocalCell: View>: View {
             steamGames.refresh()
             if SteamOwnedLibrary.enabled { steam.start(); steam.reconcileSession() }
         }
-        .onChange(of: scenePhase) { _, phase in
+        .onChange(of: scenePhase) { phase in
             if phase == .active { steamGames.refresh(); if SteamOwnedLibrary.enabled { steam.reconcileSession() } }
         }
         .sheet(item: $steamSheet) { selection in
@@ -2325,7 +2352,7 @@ struct LibraryGroupedGames<LocalCell: View>: View {
             }
         }
         .alert("Steam", isPresented: Binding(get: { steam.error != nil }, set: { if !$0 { steam.error = nil } })) {
-            Button("OK", role: .cancel) { steam.error = nil }
+            Button("好", role: .cancel) { steam.error = nil }
         } message: { Text(steam.error ?? "") }
     }
 
@@ -2455,7 +2482,7 @@ struct LibraryView: View {
         .alert(jitProblem == nil ? "Library" : "Couldn't Enable JIT",
                isPresented: Binding(get: { model.error != nil }, set: { if !$0 { model.error = nil } })) {
             if let jitProblem { jitConnectionActions(jitProblem, retry: enableJIT) { model.error = nil } }
-            Button("OK", role: .cancel) { model.error = nil }
+            Button("好", role: .cancel) { model.error = nil }
         } message: { Text(model.error ?? "") }
         .fullScreenCover(isPresented: $onboarding.presented) { OnboardingView() }
         .onAppear {
@@ -2478,7 +2505,7 @@ struct LibraryView: View {
         }
     }
     @ToolbarContentBuilder private var libraryToolbar: some ToolbarContent {
-        ToolbarItem(placement: .topBarTrailing) {
+        ToolbarItem(placement: .navigationBarTrailing) {
             Menu {
                 Picker("Library layout", selection: $layout) {
                     Label("Cards", systemImage: "square.grid.2x2").tag("cards")
@@ -2487,26 +2514,26 @@ struct LibraryView: View {
                     Label("Compact list", systemImage: "list.dash").tag("compactList")
                 }
                 Picker("Group by", selection: $group) {
-                    Label("Last played", systemImage: "clock.arrow.circlepath").tag("played")
-                    Label("Installed", systemImage: "arrow.down.circle").tag("installed")
-                    Label("Platform", systemImage: "square.stack").tag("platform")
-                    Label("None", systemImage: "square.grid.2x2").tag("none")
+                    Label("上次游玩", systemImage: "clock.arrow.circlepath").tag("played")
+                    Label("已安装", systemImage: "arrow.down.circle").tag("installed")
+                    Label("平台", systemImage: "square.stack").tag("platform")
+                    Label("无", systemImage: "square.grid.2x2").tag("none")
                 }.pickerStyle(.menu)
                 Picker("Sort by", selection: $sort) {
-                    Label("Last played", systemImage: "clock").tag("played")
+                    Label("上次游玩", systemImage: "clock").tag("played")
                     Label("Name", systemImage: "textformat.abc").tag("name")
                     Label("Recently added", systemImage: "plus").tag("added")
                     Label("Folder size", systemImage: "internaldrive").tag("size")
                 }
             } label: { Label("Library options", systemImage: "line.3.horizontal.decrease") }
         }
-        ToolbarItem(placement: .topBarTrailing) { Button { browser = true } label: { Label("Add executable", systemImage: "plus") } }
+        ToolbarItem(placement: .navigationBarTrailing) { Button { browser = true } label: { Label("添加可执行文件", systemImage: "plus") } }
     }
     @ToolbarContentBuilder private var settingsToolbar: some ToolbarContent {
-        ToolbarItem(placement: .topBarTrailing) {
+        ToolbarItem(placement: .navigationBarTrailing) {
             Button(action: enableJIT) {
                 HStack(spacing: 6) {
-                    Text("Enable JIT")
+                    Text("启用 JIT")
                     Image(systemName: "bolt.fill").accessibilityHidden(true)
                 }
             }
@@ -2535,7 +2562,7 @@ struct LibraryView: View {
             if settingsShow("diagnostics", "extended logging", "logging", "log") {
                 Section {
                     Toggle("Extended logging", isOn: $input.diagnostics)
-                } header: { Text("Diagnostics") }
+                } header: { Text("诊断") }
             }
             if settingsShow("pointer", "mouse", "cursor", "touch", "trackpad", "sensitivity") {
                 Section("Pointer") { LibraryPointerSettings() }
@@ -2549,10 +2576,11 @@ struct LibraryView: View {
             if SteamSettingsSection.shown, settingsShow("Steam", "Dock", "sign in", "account", "setup") {
                 SteamSettingsSection(open: { settingsSheet = $0 })
             }
+            if settingsShow(".NET", "Mono", "Wine Mono", "framework", "download") { WineMonoSettingsSection() }
             if settingsShow("saves", "backup", "restore", "save games") { SavesSection() }
             if settingsShow("appearance", "liquid metal", "metal", "glass") {
                 Section {
-                    Toggle("Liquid metal", isOn: $liquidMetal.on)
+                    Toggle("液态金属", isOn: $liquidMetal.on)
                 } header: { Text("Appearance") } footer: {
                     Text("Flowing chrome on the bars and the Desktop button. Off, they use the system's Liquid Glass.")
                 }
@@ -2571,7 +2599,7 @@ struct LibraryView: View {
                 SettingsSearchResults(query: settingsSearch.trimmingCharacters(in: .whitespaces), refresh: settingsRefresh)
             }
             // Credits, last on the Settings page.
-            if settingsShow("credits", "thanks", "Will Faust", "Nick", "125hz", "Jfishin", "Jesse", "JesseLovelace", "Dan Perks", "danperks", "bahacan16", "spitefulowl", "meshoklv") {
+            if settingsShow("credits", "thanks", "Will Faust", "Nick", "125hz", "Jfishin", "Jesse", "JesseLovelace", "Dan Perks", "danperks", "bahacan16", "spitefulowl", "meshoklv", "TheHadesc") {
                 Section {
                     MadeiraCredit(name: "Will Faust", handle: "willfaust", role: "Created Madeira")
                     MadeiraCredit(name: "Nick", handle: "125hz", role: "32-bit game support, the game library and Madeira Dock")
@@ -2581,13 +2609,14 @@ struct LibraryView: View {
                     MadeiraCredit(name: "bahacan16", handle: "bahacan16", role: "Direct3D 12 and DXMT fixes, game launcher windows, per-game settings, PlayStation controllers, and save backups")
                     MadeiraCredit(name: "spitefulowl", handle: "spitefulowl", role: "Wine and FEX runtime fixes, DXMT texture and memory fixes, audio, the swap tier, and library launch options")
                     MadeiraCredit(name: "meshoklv", handle: "meshoklv", role: "Controller fixes for games that ship their own XInput or need focus, touch taps that stay off the mouse, and a crash-guard fix")
-                } header: { Text("Credits") } footer: {
+                    MadeiraCredit(name: "TheHadesc", handle: "TheHadesc", role: "Madeira Dock starts for games whose Steam launch entries do not start at zero, and a touch gamepad that survives the in-game keyboard")
+                } header: { Text("致谢") } footer: {
                     Text("Madeira is built on Wine, FEX-Emu, DXMT by Feifan He (3Shain) with the Direct3D 9 frontend by David Acevedo (dacevedo12), rpmalloc by Mattias Jansson, StikDebug, StikJIT and idevice. Thank you to everyone who contributes to these projects.")
                 }
             }
         }
-        .alert("Restart Madeira", isPresented: $restartNotice) {
-            Button("OK", role: .cancel) {}
+        .alert("重启 Madeira", isPresented: $restartNotice) {
+            Button("好", role: .cancel) {}
         } message: {
             Text("Close Madeira from the app switcher and open it again to switch interfaces.")
         }
@@ -2613,7 +2642,7 @@ struct LibraryView: View {
                             // On the chrome's middle band (dark, or light in light mode), with a soft
                             // halo of the other tone for the moments a highlight passes under it.
                             let light = colorScheme == .light
-                            Label("Desktop", systemImage: "desktopcomputer")
+                            Label("桌面", systemImage: "desktopcomputer")
                                 .font(.subheadline.weight(.semibold)).foregroundStyle(light ? .black : .white)
                                 .shadow(color: (light ? Color.white : .black).opacity(0.75), radius: 2.5)
                                 .padding(.horizontal, 14).frame(minHeight: 44)
@@ -2622,7 +2651,7 @@ struct LibraryView: View {
                                 // glyphs took a tap (the plain fill's Capsule did).
                                 .contentShape(Capsule())
                         } else {
-                            Label("Desktop", systemImage: "desktopcomputer")
+                            Label("桌面", systemImage: "desktopcomputer")
                                 .font(.subheadline.weight(.medium)).padding(.horizontal, 14).frame(minHeight: 44)
                                 .background(Color(uiColor: .secondarySystemGroupedBackground), in: Capsule())
                         }
@@ -2673,7 +2702,7 @@ struct LibraryView: View {
                                           part: steamFirst ? .notInstalled : .all, open: { selected = $0 })
                     }
                 } else if model.entries.filter({ $0.desktop != true && $0.steamAppID == nil }).isEmpty {
-                    ContentUnavailableView("Make yourself at home", systemImage: "gamecontroller", description: Text("Copy a game's folder into Madeira › wine › drive_c with the Files app, then tap + and choose its .exe."))
+                    CompatContentUnavailableView("Make yourself at home", systemImage: "gamecontroller", description: Text("用「文件」App 把游戏文件夹复制到 Madeira › wine › drive_c，然后点 + 并选择它的 .exe。"))
                 } else {
                     cells(entries, width: viewport.size.width)
                 }
@@ -2700,7 +2729,7 @@ struct LibraryView: View {
             }
         }
         .sheet(isPresented: $browser) {
-            NavigationStack { ExecutableBrowser(folder: LibraryModel.drive) { entry in
+            CompatNavigationStack { ExecutableBrowser(folder: LibraryModel.drive) { entry in
                 model.save(entry); browser = false; selected = entry
             } }
         }
@@ -2717,23 +2746,23 @@ struct LibraryView: View {
                 }
             })
         }
-        .onChange(of: model.current) { _, current in if current != nil { selected = nil } }
-        .onChange(of: model.error) { _, error in if error != nil { selected = nil } }
-        .onChange(of: model.restartNotice) { _, notice in if notice != nil { selected = nil } }
-        .onChange(of: model.jitNotice) { _, notice in if notice != nil { selected = nil } }
-        .onChange(of: model.cloudNotice) { _, notice in if notice != nil { selected = nil } }
-        .onChange(of: jit.showSetup) { _, show in if show { selected = nil } }
-        .onChange(of: model.showDetail) { _, id in
+        .onChange(of: model.current) { current in if current != nil { selected = nil } }
+        .onChange(of: model.error) { error in if error != nil { selected = nil } }
+        .onChange(of: model.restartNotice) { notice in if notice != nil { selected = nil } }
+        .onChange(of: model.jitNotice) { notice in if notice != nil { selected = nil } }
+        .onChange(of: model.cloudNotice) { notice in if notice != nil { selected = nil } }
+        .onChange(of: jit.showSetup) { show in if show { selected = nil } }
+        .onChange(of: model.showDetail) { id in
             guard let id else { return }
             model.showDetail = nil
             selected = model.entries.first { $0.id == id }
         }
-        .onChange(of: scenePhase) { _, phase in if phase == .active { model.refreshFlag() } }
+        .onChange(of: scenePhase) { phase in if phase == .active { model.refreshFlag() } }
         .onAppear {
             if focused == nil { focused = LibraryEntry.desktopID }
             GlassSkin.shared.start()   // liquid metal on the navigation bar's glass pills
         }
-        .onChange(of: focused) { _, id in
+        .onChange(of: focused) { id in
             if let id { withAnimation(UIAccessibility.isReduceMotionEnabled ? nil : .easeInOut(duration: 0.2)) { reader.scrollTo(id, anchor: .center) } }
         }
         }
@@ -2803,7 +2832,7 @@ struct ExecutableBrowser: View {
             }
             if files.isEmpty && error == nil { Text("No executables here. Copy files into Madeira/wine/drive_c using Files.").foregroundStyle(.secondary) }
         }.navigationTitle(folder.lastPathComponent)
-        .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } } }
+        .toolbar { ToolbarItem(placement: .cancellationAction) { Button("完成") { dismiss() } } }
         .task {
             do {
                 // ml1163: .bat and .cmd files are listed too (they run through cmd.exe).
@@ -2839,36 +2868,6 @@ struct LibraryDetail: View {
     /// Settings › Sync engine, read when the details open: the fastsync switches
     /// below only apply while it is Fastsync.
     @State private var syncEngine = SyncEngine.current
-    static let presetResolutions = ["640x480", "800x600", "960x540", "1024x768", "1280x720", "1280x960", "1408x648", "1920x1080", "2560x1440"]
-    /// The presets, plus a stored size that is none of them (a screen shape
-    /// chosen on another device), so the picker never shows a blank choice.
-    static func resolutions(keeping current: String) -> [String] {
-        presetResolutions.contains(current) || current == screenShapeResolution || current == metalFXShapeResolution
-            ? presetResolutions : presetResolutions + [current]
-    }
-    /// "WxH" matching this screen's landscape aspect at 720 lines (width
-    /// rounded to a multiple of 8), or nil when it equals a preset or
-    /// MADEIRA_SCREEN_SHAPE_RESOLUTION=0.
-    static var screenShapeResolution: String? {
-        guard MadeiraConfig.flag("MADEIRA_SCREEN_SHAPE_RESOLUTION") else { return nil }
-        let bounds = UIScreen.main.bounds
-        let long = max(bounds.width, bounds.height), short = min(bounds.width, bounds.height)
-        guard short > 0 else { return nil }
-        let width = Int((720 * long / short / 8).rounded()) * 8
-        guard (640...4096).contains(width), width != 1280, width != 960 else { return nil }
-        return "\(width)x720"
-    }
-    /// The same shape at 480 lines, the size MetalFX 1.5× brings to 720; nil
-    /// when it equals a preset or MADEIRA_SCREEN_SHAPE_RESOLUTION=0.
-    static var metalFXShapeResolution: String? {
-        guard MadeiraConfig.flag("MADEIRA_SCREEN_SHAPE_RESOLUTION") else { return nil }
-        let bounds = UIScreen.main.bounds
-        let long = max(bounds.width, bounds.height), short = min(bounds.width, bounds.height)
-        guard short > 0 else { return nil }
-        let width = Int((480 * long / short / 8).rounded()) * 8
-        guard (640...4096).contains(width), !presetResolutions.contains("\(width)x480") else { return nil }
-        return "\(width)x480"
-    }
     /// "None", or how many keys this game's own config sets.
     static func configSummary(_ config: String?) -> String {
         let count = MadeiraConfig.parse(config ?? "").count
@@ -2906,7 +2905,7 @@ struct LibraryDetail: View {
         }
     }
     var body: some View {
-        NavigationStack {
+        CompatNavigationStack {
             Form {
                 Section {
                     HStack(spacing: 20) {
@@ -2919,12 +2918,16 @@ struct LibraryDetail: View {
                             } else if let played = entry.lastPlayed {
                                 Text("Last played \(played.formatted(.relative(presentation: .named)))").font(.subheadline).foregroundStyle(.secondary)
                             }
+                            // A game Valve's client starts (Madeira Dock): can it start without a connection?
+                            if DockOffline.enabled, let appID = entry.steamAppID, !entry.startsSteamGameDirectly {
+                                DockOfflineMark(appID: appID)
+                            }
                             Button(action: start) {
                                 HStack(spacing: 10) {
                                     // Enabling JIT can take seconds with nothing else on screen.
                                     if model.startingJIT == entry.id {
                                         ProgressView().tint(.white)
-                                        Text("Starting JIT").fontWeight(.semibold)
+                                        Text("正在启动 JIT").fontWeight(.semibold)
                                     } else {
                                         Image(systemName: "play.fill"); Text("Play").fontWeight(.semibold)
                                     }
@@ -2943,7 +2946,7 @@ struct LibraryDetail: View {
                 }
                 if entry.desktop != true { Section("Library details") {
                     TextField("Title", text: $entry.title)
-                    Button("Find on Steam", systemImage: "magnifyingglass") { findCover = true }
+                    Button("在 Steam 查找", systemImage: "magnifyingglass") { findCover = true }
                     Button("Choose cover image", systemImage: "photo") { importCover = true }
                     if entry.coverFile != nil { Button((entry.steamAppID ?? entry.steamID) != nil ? "Use Steam artwork" : "Remove cover image") { entry.coverFile = nil } }
                 } }
@@ -2955,16 +2958,22 @@ struct LibraryDetail: View {
                 }
                 Section {
                     // The Windows screen the game renders for (and the Desktop's size).
+                    // ml1172: this device's choices (ResolutionChoices), grouped.
+                    let groups = ResolutionChoices.groups()
+                    let metalFX = ResolutionChoices.metalFX(in: groups)
                     Picker("Resolution", selection: $entry.resolution) {
-                        ForEach(Self.resolutions(keeping: entry.resolution), id: \.self) { Text($0.replacingOccurrences(of: "x", with: "×")).tag($0) }
-                        // This device's own aspect ratio at 720 lines, so the game
-                        // fills the screen without bars or stretching.
-                        if let shape = Self.screenShapeResolution {
-                            Text("Screen shape (\(shape.replacingOccurrences(of: "x", with: "×")))").tag(shape)
+                        ForEach(groups, id: \.title) { group in
+                            Section(group.title) {
+                                ForEach(group.choices, id: \.value) { Text($0.label).tag($0.value) }
+                            }
                         }
-                        // The same shape at 480 lines, which MetalFX 1.5× brings to 720.
-                        if let shape = Self.metalFXShapeResolution, entry.metalFXUpscale == 1.5 || entry.resolution == shape {
-                            Text("Screen shape for MetalFX 1.5× (\(shape.replacingOccurrences(of: "x", with: "×")))").tag(shape)
+                        // The screen's shape at 480 lines, which MetalFX 1.5× brings to 720.
+                        if let shape = metalFX, entry.metalFXUpscale == 1.5 || entry.resolution == shape.value {
+                            Text(shape.label).tag(shape.value)
+                        }
+                        // A size none of them has, so the picker never shows a blank choice.
+                        if entry.resolution != metalFX?.value, let saved = ResolutionChoices.extra(entry.resolution, in: groups, note: "saved") {
+                            Text(saved.label).tag(entry.resolution)
                         }
                     }
                     Picker("Aspect & scaling", selection: Binding(get: { entry.displayMode.rawValue }, set: { entry.display = $0 })) {
@@ -2974,17 +2983,17 @@ struct LibraryDetail: View {
                     // the same path, and its launch applies them like a game's
                     // (applyEnvironment, gameConfigText). check-frontend holds the parity.
                     Picker("MetalFX upscaling", selection: $entry.metalFXUpscale) {
-                        Text("Off").tag(Double?.none)
+                        Text("关").tag(Double?.none)
                         Text("1.5×").tag(Double?.some(1.5))
                         Text("2×").tag(Double?.some(2))
                     }
                     FPSChoice(mode: $entry.fpsMode)
-                    Toggle("Frame generation (experimental)", isOn: Binding(get: { entry.frameGeneration ?? false }, set: { entry.frameGeneration = $0 ? true : nil }))
+                    Toggle("帧生成（实验性）", isOn: Binding(get: { entry.frameGeneration ?? false }, set: { entry.frameGeneration = $0 ? true : nil }))
                     if entry.frameGeneration == true {
                         Text("Shows a MetalFX-generated frame between every two rendered frames: twice the frames on screen, at the cost of GPU time, some latency and artifacts at edges and on the HUD. FPS limits do not apply while it is on.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
-                } header: { Text("Display") } footer: {
+                } header: { Text("显示") } footer: {
                     Text("MetalFX upscaling renders at the resolution above and scales the picture up with Apple's MetalFX spatial scaler before it reaches the screen (Direct3D 11 and 12 programs). Use it with a small resolution for frame rate.")
                 }
                 // ml1163: how the program starts. Not for the Desktop entry, nor for a Steam
@@ -2996,9 +3005,9 @@ struct LibraryDetail: View {
                             entry.launchMode = $0 == "desktop" ? "desktop" : nil
                         })) {
                             Text("Directly").tag("direct")
-                            Text("In the Wine desktop").tag("desktop")
+                            Text("在 Wine 桌面中").tag("desktop")
                         }
-                        TextField("Working folder (default: the program's folder)", text: Binding(get: { entry.workingDirectory ?? "" }, set: {
+                        TextField("工作文件夹（默认：程序所在文件夹）", text: Binding(get: { entry.workingDirectory ?? "" }, set: {
                             entry.workingDirectory = $0.trimmingCharacters(in: .whitespaces).isEmpty ? nil : $0
                         })).autocorrectionDisabled().textInputAutocapitalization(.never).font(.body.monospaced())
                         Toggle("Start Windows services first", isOn: Binding(get: { entry.startServices == true }, set: {
@@ -3006,7 +3015,7 @@ struct LibraryDetail: View {
                         }))
                     } header: { Text("Launch") } footer: {
                         VStack(alignment: .leading, spacing: 4) {
-                            Text("Directly: the game is Wine's first program, with no desktop; small windows such as launchers and message boxes are drawn over the game, a window drawn without DirectX that fills the screen is not. In the Wine desktop: the game starts inside the Wine desktop at the Resolution above, where every window shows.")
+                            Text("直接：游戏是 Wine 的第一个程序，没有桌面；启动器和消息框等小窗口绘制在游戏画面之上，而占满屏幕的非 DirectX 窗口则不会。Wine 桌面：游戏在上方分辨率设定的 Wine 桌面中启动，所有窗口都会显示。")
                             Text("The working folder is a C:\\ path, for example C:\\Games\\Some Game. Start Windows services first is for launchers that need them (Steam-style COM); Madeira writes a batch file for it in C:\\madeira-games.")
                             if !entry.runsInDesktop && (entry.isBatch || entry.startServices == true) {
                                 // Wine stops with its first process (the ml1163 open risk).
@@ -3019,7 +3028,7 @@ struct LibraryDetail: View {
                 // A Steam game starts with Steam's own launch option through Madeira Dock.
                 if entry.desktop != true && entry.steamAppID == nil {
                     Section {
-                        TextField("Launch arguments", text: $entry.arguments, axis: .vertical)
+                        TextField("启动参数", text: $entry.arguments, axis: .vertical)
                             .font(.body.monospaced()).lineLimit(1...4)
                             .autocorrectionDisabled().textInputAutocapitalization(.never)
                         LaunchFlagChips(arguments: $entry.arguments)
@@ -3027,7 +3036,7 @@ struct LibraryDetail: View {
                         // the services batch, what starts the program).
                         Text(entry.commandPreview)
                             .font(.caption.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
-                    } header: { Text("Launch arguments") } footer: {
+                    } header: { Text("启动参数") } footer: {
                         Text("Passed to the program on every start; the line above is the command that runs. The flags add or remove themselves; the renderer flags exclude each other, as do -windowed and -fullscreen.")
                     }
                 }
@@ -3044,7 +3053,7 @@ struct LibraryDetail: View {
                         Text("Application default").tag(0)
                         ForEach([1, 2, 4, 8], id: \.self) { Text("Up to \($0)×").tag($0) }
                     }
-                    Toggle("Report an NVIDIA GPU", isOn: Binding(get: { entry.reportNVIDIA ?? false }, set: { entry.reportNVIDIA = $0 ? true : nil }))
+                    Toggle("报告为 NVIDIA GPU", isOn: Binding(get: { entry.reportNVIDIA ?? false }, set: { entry.reportNVIDIA = $0 ? true : nil }))
                     // Fastsync-only switches: shown for every game, usable only while
                     // Settings › Sync engine is Fastsync.
                     Group {
@@ -3057,21 +3066,21 @@ struct LibraryDetail: View {
                         Text("Fast synchronization and fast semaphore waits are Fastsync options. Choose Fastsync in Settings › Memory & sync to use them.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
-                } header: { Text("Compatibility & performance") } footer: {
+                } header: { Text("兼容性与性能") } footer: {
                     Text("Reduced-precision x87 can make older games faster at some cost in accuracy; it is off by default. Turn on AVX and AVX2 (off by default, 64-bit games) when a game built for AVX processors quits at start with an illegal instruction (c000001d); FEX then emulates AVX, which is slower. Report an NVIDIA GPU is for games that stop with \"no graphics card\" or \"failed to get GPU driver info\". With Fastsync, fast synchronization (on by default) handles events without a server round trip, and fast semaphore waits (off by default) does the same for semaphores. Settings apply to the next launch; a precision change may still require restarting Madeira.")
                 }
                 Section("On screen") {
-                    Toggle("Performance overlay", isOn: $entry.performance)
+                    Toggle("性能悬浮层", isOn: $entry.performance)
                     Toggle("Live logs", isOn: $entry.liveLogs)
-                    Toggle("Touch controls", isOn: $entry.touchControls)
+                    Toggle("触屏控制", isOn: $entry.touchControls)
                     if GamepadInput.keyboardMouseAvailable {
                         ControllerModeChoice(mode: $entry.controllerMode)
                         if entry.controllerMode == "keys" {
                             NavigationLink("Controller binds") {
                                 Form { ControllerBindsPage(binds: $entry.controllerBinds, mouseVertical: $entry.padMouseVertical) }
-                                    .navigationTitle("Controller binds")
+                                    .navigationTitle("手柄绑定")
                                     .toolbar {
-                                        Button("Reset") { entry.controllerBinds = nil; entry.padMouseVertical = nil }
+                                        Button("重置") { entry.controllerBinds = nil; entry.padMouseVertical = nil }
                                             .disabled(entry.controllerBinds == nil && entry.padMouseVertical == nil)
                                     }
                             }
@@ -3096,7 +3105,7 @@ struct LibraryDetail: View {
                         LabeledContent("This game's config", value: Self.configSummary(entry.config))
                     }
                 } header: { Text("Advanced") } footer: {
-                    Text("Lines in madeira.cfg's format for this game only. A key set here wins over madeira.cfg wherever the runtime reads it, env.NAME lines are exported after madeira.cfg's, and dxmt options are added to madeira.cfg's. Applies from the next start.")
+                    Text("仅对这一个游戏生效的 madeira.cfg 格式配置。这里设置的键在运行时读取处覆盖 madeira.cfg，env.NAME 行在 madeira.cfg 之后导出，dxmt 选项会并入 madeira.cfg。下次启动时生效。")
                 }
                 // A link that starts this game from a Home Screen icon (SavesAndShortcuts.swift).
                 if entry.desktop != true {
@@ -3109,7 +3118,7 @@ struct LibraryDetail: View {
                                   systemImage: copiedLink ? "checkmark" : "link")
                         }
                     } header: { Text("Home Screen") } footer: {
-                        Text("In the Shortcuts app: new shortcut, Open URLs, paste the link, then Share › Add to Home Screen.")
+                        Text("在快捷指令 App 中：新建快捷指令，添加「打开 URL」，粘贴链接，然后 分享 › 添加到主屏幕。")
                     }
                 }
                 if entry.steamAppID != nil {
@@ -3118,7 +3127,7 @@ struct LibraryDetail: View {
                         if entry.startsSteamGameDirectly, !entry.launchArguments.isEmpty {
                             Text(entry.launchArguments).font(.caption.monospaced()).textSelection(.enabled)
                         }
-                    } header: { Text("Executable") } footer: {
+                    } header: { Text("可执行文件") } footer: {
                         Text(entry.startsSteamGameDirectly
                              ? "The game starts this program directly, without Steam."
                              : "Valve's client starts the game's default Steam launch option from this folder.")
@@ -3130,9 +3139,7 @@ struct LibraryDetail: View {
                 if let error { Section { Text(error).foregroundStyle(.red) } }
             }
             .navigationTitle("Game details").navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(.regularMaterial, for: .navigationBar)
-            .toolbarBackground(.visible, for: .navigationBar)
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { model.save(entry); dismiss() } } }
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { model.save(entry); dismiss() } } }
             .sheet(isPresented: $findCover) { SteamSearchView(query: entry.title) { match in entry.steamID = match.id; entry.title = match.name; entry.coverFile = nil } }
             .fileImporter(isPresented: $importCover, allowedContentTypes: [.image]) { result in
                 do {
@@ -3149,7 +3156,7 @@ struct LibraryDetail: View {
                 } catch { self.error = error.localizedDescription }
             }
             .confirmationDialog("Remove this library entry? Your executable and saves stay in drive_c.", isPresented: $remove, titleVisibility: .visible) {
-                Button("Remove", role: .destructive) { leaving = true; model.remove(entry.id); dismiss() }
+                Button("移除", role: .destructive) { leaving = true; model.remove(entry.id); dismiss() }
             }
             .task {
                 if entry.graphicsAPI == nil, entry.desktop != true, let url = try? LibraryModel.executable(entry.relativePath) { entry.graphicsAPI = LibraryModel.graphicsImports(url) }
@@ -3194,7 +3201,7 @@ struct SteamSearchView: View {
     @State private var loading = false
     @State private var submitted = ""
     var body: some View {
-        NavigationStack {
+        CompatNavigationStack {
             List {
                 if loading { ProgressView("Searching Steam…") }
                 if let error { Text(error).foregroundStyle(.secondary) }
@@ -3206,9 +3213,9 @@ struct SteamSearchView: View {
                         }
                     }
                 }
-            }.navigationTitle("Find on Steam")
+            }.navigationTitle("在 Steam 查找")
             .searchable(text: $query, prompt: "Title").onSubmit(of: .search) { submitted = query }
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } } }
             .onAppear { submitted = query }
             .task(id: submitted) {
                 guard !submitted.trimmingCharacters(in: .whitespaces).isEmpty else { return }
@@ -3318,7 +3325,7 @@ struct ControllerBindsPage: View {
                 }
                 if changed {
                     Divider()
-                    Button("Default") { binds?[name] = nil; if binds?.isEmpty == true { binds = nil } }
+                    Button("默认") { binds?[name] = nil; if binds?.isEmpty == true { binds = nil } }
                 }
             } label: {
                 HStack(spacing: 6) {
@@ -3381,6 +3388,57 @@ struct ControllerBindsPage: View {
     }
 }
 
+/// Game details: whether a Steam game that Valve's client starts (Madeira Dock)
+/// can start without a connection (DockOffline.Mark). Steam's offline sign-in
+/// belongs to the account: once Valve's client has reported that it can sign the
+/// account in offline, every installed game can start that way, and the client
+/// answers the license question from the list it cached. Only a game whose
+/// per-user program Steam prepares on its first start still needs that one start
+/// online. Tapping the line explains it; an offline start is always Steam's
+/// decision at that moment.
+struct DockOfflineMark: View {
+    let appID: Int
+    @State private var explain = false
+    /// The game's install record lists per-user executables (read once; it scans the library).
+    @State private var preparedOnline = false
+    var body: some View {
+        let mark = DockOffline.mark(appID, preparedOnline: preparedOnline)
+        let ready: Bool = { if case .ready = mark { return true } else { return false } }()
+        Button { explain = true } label: {
+            // Not a Label: inside a Form row a Label takes the list's wide icon column,
+            // which leaves the text far from its symbol.
+            HStack(spacing: 5) {
+                Image(systemName: ready ? "checkmark.circle.fill" : "wifi.exclamationmark")
+                Text(Self.line(mark))
+            }
+            .font(.caption.weight(.medium))
+            .foregroundStyle(ready ? Color.green : Color.secondary)
+        }
+        .buttonStyle(.plain)
+        .task { preparedOnline = MadeiraDock.games(drive: MadeiraDock.drive).first { $0.id == appID }?.customExecutables ?? false }
+        .alert(ready ? "Can be played offline" : "Not ready for offline play yet", isPresented: $explain) {
+            Button("好", role: .cancel) {}
+        } message: { Text(Self.explanation(mark)) }
+    }
+    static func line(_ mark: DockOffline.Mark) -> String {
+        switch mark {
+        case .ready: return "Can be played offline"
+        case .needsFirstStart: return "Start once online to play offline"
+        case .needsOnline: return "Start a game online to play offline"
+        }
+    }
+    static func explanation(_ mark: DockOffline.Mark) -> String {
+        switch mark {
+        case .ready(let saved):
+            return "Steam signed in online on this device on \(saved.formatted(date: .abbreviated, time: .omitted)) and can now sign this account in without a connection. With no internet, Madeira asks Steam to start the game offline; Steam checks its saved sign-in and its saved list of your licenses each time. Its offline sign-in expires after a while, so start a game online now and then. A game that needs its own servers still needs them."
+        case .needsFirstStart:
+            return "Steam can sign this account in offline, but it prepares this game's program for your account the first time it starts, and that needs a connection. Start this game once while you are online."
+        case .needsOnline:
+            return "Steam has not saved an offline sign-in on this device yet. Start any Steam game once while you are online; after that, installed games can start without a connection."
+        }
+    }
+}
+
 /// Game details and the Session menu: how a physical controller reaches the game.
 struct ControllerModeChoice: View {
     @Binding var mode: String?
@@ -3388,8 +3446,8 @@ struct ControllerModeChoice: View {
         LabeledContent("Controller") {
             Picker("Controller", selection: Binding(get: { mode ?? "" }, set: { mode = $0.isEmpty ? nil : $0 })) {
                 Text("Game's own support").tag("")
-                Text("XInput and DirectInput").tag("dinput")
-                Text("Keyboard and mouse").tag("keys")
+                Text("XInput 和 DirectInput").tag("dinput")
+                Text("键盘和鼠标").tag("keys")
             }.pickerStyle(.menu).labelsHidden()
         }
     }
@@ -3474,8 +3532,8 @@ struct DisplayRateSettings: View {
                 MadeiraConfig.set("env.MADEIRA_PROMOTE", on ? "1" : nil)
                 LogStore.shared.log("[runtime-settings] promote=\(on ? 1 : 0)")
             }))
-        } header: { Text("Display") } footer: {
-            Text("Off by default. On a 120 Hz display, keeps the panel at 120 Hz during a game's 60 FPS limit so a frame that misses one refresh waits 8 ms instead of 17 ms. Uses more power.")
+        } header: { Text("显示") } footer: {
+            Text("默认关闭。在 120 Hz 屏幕上，游戏以 60 FPS 限制运行时保持面板 120 Hz，错过一次刷新的帧只需等 8 ms 而不是 17 ms。更耗电。")
         }
     }
 }
@@ -3623,7 +3681,7 @@ struct RuntimeMemorySyncSettings: View {
             })) {
                 ForEach(SyncEngine.allCases) { Text($0.label).tag($0) }
             }
-            Toggle("Eco mode", isOn: Binding(get: { eco }, set: { on in
+            Toggle("省电模式", isOn: Binding(get: { eco }, set: { on in
                 eco = on; changed = true
                 MadeiraConfig.set("eco", on ? "1" : nil)
                 LogStore.shared.log("[runtime-settings] eco=\(on ? 1 : 0)")
@@ -3631,17 +3689,17 @@ struct RuntimeMemorySyncSettings: View {
             Button { open(.allSettings) } label: {
                 Label("All settings (\(ConfigCatalog.generated.count - Self.featuredKeys.count) more)", systemImage: "slider.horizontal.3")
             }
-        } header: { Text("Memory & sync") } footer: {
+        } header: { Text("内存与同步") } footer: {
             VStack(alignment: .leading, spacing: 4) {
                 Text("JIT pool is the memory reserved at launch for translated x86 code (256 to 1152 MB; below 512 MB, large games can run out of room for it).")
-                Text("Video memory is how much graphics memory games are told they have. Automatic sizes it from the memory free at launch. Too high can get Madeira closed for using too much memory; too low makes games keep reloading textures.")
-                Text("Swap tier moves game data to a file on this device's storage when memory runs short, up to the chosen size, at some speed cost. Coverage decides which allocations it moves: large ones only (8 MB and up, the default), every allocation of 1 MB and up, or those plus allocations that overflow the game's address range. Broad backs every new reservation of 4 MB and up (madeira.cfg swap-min-mb moves the floor) as it is made, so the small commits games make inside it are covered too, and the swap tier size limits the storage it uses. Wider coverage saves more memory but can slow a game down.")
+                Text("显存是告知游戏它拥有多少图形内存。「自动」按启动时的可用内存计算。过高可能导致 Madeira 因占用内存过多被系统关闭；过低会让游戏反复重新加载纹理。")
+                Text("内存不足时，交换层把游戏数据移到本机存储上的一个文件，上限为所选大小，有一定速度代价。覆盖范围决定移动哪些分配：仅大块（8 MB 及以上，默认）、1 MB 及以上的全部分配，或再加上溢出游戏地址范围的分配。宽泛模式会在每个 4 MB 及以上的新保留区创建时就为其提供后备（madeira.cfg 的 swap-min-mb 可调下限），游戏在其中做的小提交也能覆盖。交换层大小限制其占用的存储。覆盖越宽省内存越多，但可能拖慢游戏。")
                 Text("Sync engine: Fastsync (the default) handles events and semaphores in-process; its per-game options are in each game's details. Madsync is the older in-process engine. Wine standard sync uses neither. Only one engine runs at a time.")
                 Text("Eco mode starts every game with its threads at a low priority, which saves power but makes games run slower. Off by default. It is meant for loading screens: Eco mode in the in-game menu turns it on and off while a game runs.")
                 if changed { Text("Restart Madeira (close it from the app switcher) for these changes to apply.").foregroundStyle(.orange) }
             }
         }
-        .onChange(of: refresh) { _, _ in
+        .onChange(of: refresh) { _ in
             poolMB = Self.intKey("pool"); vramMB = Self.intKey("vram-mb"); swapMB = Self.intKey("swap-mb")
             coverage = Self.currentCoverage(); engine = SyncEngine.current
             eco = MadeiraConfig.bool("eco", default: false)
@@ -3660,7 +3718,7 @@ struct LibraryPointerSettings: View {
     }
     var body: some View {
         Picker("Pointer mode", selection: mode) {
-            Text("Absolute").tag("absolute"); Text("Relative").tag("relative"); Text("Touch").tag("touch")
+            Text("绝对").tag("absolute"); Text("Relative").tag("relative"); Text("Touch").tag("touch")
         }.pickerStyle(.segmented)
         Text(input.touchMode ? "Tap the screen to position and click. Hold and move to drag. Two fingers: right click or scroll."
              : (input.relative ? "Drag to send relative mouse movement for mouse-look. Tap to click." : "Drag the pointer like a trackpad. Tap to click."))
@@ -3724,7 +3782,7 @@ struct LibraryFloatingItem: View {
         .frame(maxWidth: isMenu ? 48 : max(48, min(390, viewport.width - insets.leading - insets.trailing - 16)))
         .fixedSize(horizontal: false, vertical: true)
         .background(GeometryReader { proxy in
-            Color.clear.onAppear { measured = proxy.size }.onChange(of: proxy.size) { _, size in measured = size }
+            Color.clear.onAppear { measured = proxy.size }.onChange(of: proxy.size) { size in measured = size }
         })
         .contentShape(Rectangle())
         .highPriorityGesture(DragGesture(minimumDistance: 6, coordinateSpace: .global).updating($drag) { value, state, transaction in
@@ -3736,7 +3794,7 @@ struct LibraryFloatingItem: View {
             }
         })
         .position(center)
-        .onAppear { record(rect) }.onChange(of: rect) { _, value in record(value) }
+        .onAppear { record(rect) }.onChange(of: rect) { value in record(value) }
         .onDisappear { record(.zero) }
         .task(id: touched) {
             guard isMenu else { return }
@@ -3809,7 +3867,7 @@ struct LibraryHUD: View {
             .preferredColorScheme(.dark)
         }.ignoresSafeArea()
         .onAppear { model.saveCurrentProfile() }
-        .onChange(of: model.menu) { _, open in
+        .onChange(of: model.menu) { open in
             LibraryController.shared.configure(enabled: model.enabled, ownsInput: open)
             if !open { bindsPage = false }
             if !open { model.saveCurrentProfile() }
@@ -3932,13 +3990,13 @@ struct LibraryHUD: View {
     private var bindsMenu: some View {
         VStack(spacing: 0) {
             HStack {
-                Button("Session", systemImage: "chevron.left") { bindsPage = false }.buttonStyle(.borderless)
+                Button("会话", systemImage: "chevron.left") { bindsPage = false }.buttonStyle(.borderless)
                 Spacer()
-                Text("Controller binds").font(.headline)
+                Text("手柄绑定").font(.headline)
                 Spacer()
-                Button("Reset") { model.controllerBinds = [:]; model.padMouseVertical = 1; model.saveCurrentProfile() }
+                Button("重置") { model.controllerBinds = [:]; model.padMouseVertical = 1; model.saveCurrentProfile() }
                     .buttonStyle(.borderless).disabled(model.controllerBinds.isEmpty && model.padMouseVertical == 1)
-                Button("Done") { model.menu = false }.buttonStyle(.bordered)
+                Button("完成") { model.menu = false }.buttonStyle(.bordered)
             }.padding(.horizontal, 22).padding(.top, 22).padding(.bottom, 8)
             Form {
                 ControllerBindsPage(binds: Binding(get: { model.controllerBinds.isEmpty ? nil : model.controllerBinds },
@@ -3946,16 +4004,16 @@ struct LibraryHUD: View {
                                     mouseVertical: Binding(get: { model.padMouseVertical == 1 ? nil : model.padMouseVertical },
                                                            set: { model.padMouseVertical = $0 ?? 1; model.saveCurrentProfile() }),
                                     controls: controls.controls)
-            }.scrollContentBackground(.hidden)
+            }
         }
     }
 
     private var menu: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                HStack { Label("Session", systemImage: "gamecontroller.fill").font(.title2.bold()); Spacer(); Button("Done") { model.menu = false }.buttonStyle(.bordered) }
+                HStack { Label("会话", systemImage: "gamecontroller.fill").font(.title2.bold()); Spacer(); Button("完成") { model.menu = false }.buttonStyle(.bordered) }
                 // The controls come first, the easiest to reach; the overlay settings last.
-                Toggle("Touch controls", isOn: $controls.visible)
+                Toggle("触屏控制", isOn: $controls.visible)
                 // The named layouts (Xbox controller, custom ones) live here in a session: this
                 // menu replaces the overlay's top bar, where the same menu sits outside the library.
                 if controls.visible && ControlPresetsModel.enabled {
@@ -3970,7 +4028,7 @@ struct LibraryHUD: View {
                 if GamepadInput.keyboardMouseAvailable {
                     ControllerModeChoice(mode: Binding(get: { model.controllerMode }, set: { model.controllerMode = $0; model.saveCurrentProfile() }))
                     if model.controllerMode == "keys" {
-                        Button("Controller binds", systemImage: "gamecontroller") { bindsPage = true }
+                        Button("手柄绑定", systemImage: "gamecontroller") { bindsPage = true }
                     } else if model.controllerMode == "dinput" {
                         // ml1240: the DirectInput device exists only from the launch on.
                         Text("XInput and DirectInput applies to the next launch.")
@@ -3992,14 +4050,14 @@ struct LibraryHUD: View {
                 Divider()
                 // ml1133's ECO switch, live: the same as the developer overlay's ECO pill.
                 Text("CPU").font(.headline)
-                Toggle("Eco mode", isOn: Binding(get: { eco }, set: { on in eco = on; madeira_set_eco(on ? 1 : 0) }))
+                Toggle("省电模式", isOn: Binding(get: { eco }, set: { on in eco = on; madeira_set_eco(on ? 1 : 0) }))
                 Text("Runs the game's threads at a low priority, on the efficiency cores: cooler and slower. Use it while a game loads and turn it off to play.")
                     .font(.caption).foregroundStyle(.secondary)
                 Divider()
-                Text("Mouse & pointer").font(.headline)
+                Text("鼠标与指针").font(.headline)
                 LibraryPointerSettings()
                 Divider()
-                Toggle("Performance overlay", isOn: $model.performance)
+                Toggle("性能悬浮层", isOn: $model.performance)
                 if model.performance {
                     ForEach(["FPS", "Frame time", "CPU", "GPU", "RAM", "Battery", "Thermal"], id: \.self) { field in
                         Toggle(field, isOn: Binding(get: { model.overlayFields.contains(field) }, set: { on in
@@ -4012,7 +4070,7 @@ struct LibraryHUD: View {
                 // MADEIRA_SESSION_TOOLS=0).
                 if sessionTools && sessionDiagnostics {
                     Divider()
-                    Text("Diagnostics").font(.headline)
+                    Text("诊断").font(.headline)
                     Button("Capture the next frame", systemImage: "camera.viewfinder") {
                         model.menu = false
                         // After the menu has gone, so the frame shows what the player saw.
@@ -4045,7 +4103,6 @@ struct LibraryHUD: View {
             }.frame(maxWidth: .infinity, alignment: .leading).padding(22)
                 .foregroundStyle(.primary)
         }
-        .scrollIndicators(.visible)
     }
 }
 
@@ -4063,7 +4120,7 @@ struct LibraryLiveLogs: View {
                     }
                 }
                 .frame(maxWidth: .infinity, minHeight: max(0, geo.size.height - 16), alignment: .topLeading)
-            }.defaultScrollAnchor(.bottom).padding(8)
+            }.padding(8)
         }.background(.black.opacity(0.65), in: RoundedRectangle(cornerRadius: 10)).foregroundStyle(.white)
             .accessibilityLabel("Live diagnostic log")
     }
@@ -4095,7 +4152,7 @@ struct LibraryMetrics: View {
                 applyGPUMeter()
             }
             .onDisappear { UIDevice.current.isBatteryMonitoringEnabled = false; madeira_gpu_meter_enable(0) }
-            .onChange(of: model.overlayFields) { _, _ in applyGPUMeter() }
+            .onChange(of: model.overlayFields) { _ in applyGPUMeter() }
             .onReceive(ticks) { now in
                 let count = madeira_get_present_count(); let dt = now.timeIntervalSince(lastTime)
                 let frames = count >= lastCount ? count - lastCount : 0
@@ -4227,6 +4284,7 @@ enum LibraryKeyboard {
         fputs("[frontend-keyboard] key-window input activated\n", stderr)
     }
     static func hide() {
+        if window != nil { fputs("[frontend-keyboard] key-window input deactivated\n", stderr) }
         input?.releaseModifiers(); input?.resignFirstResponder(); window?.isHidden = true
         window = nil; input = nil; previous?.makeKey(); previous = nil
     }
