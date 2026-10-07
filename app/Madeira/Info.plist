@@ -57,7 +57,7 @@
 		<string>_remotepairing-pairable-host._tcp</string>
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Madeira uses the local network to pair with this device for JIT, without a computer.</string>
+	<string>Madeira 使用本地网络为本设备配对以启用 JIT，无需电脑。</string>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
 	<key>UIFileSharingEnabled</key>
