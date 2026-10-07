@@ -82,6 +82,7 @@ final class MadeiraDockModel: ObservableObject {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
                 let report = MadeiraDock.pollReport()
+                DockOffline.observe(report.fields)
                 // The game's one-time installs run before the host writes its first field.
                 if DockInstallers.script != nil {
                     let progress = DockInstallers.poll(drive: MadeiraDock.drive)
@@ -132,7 +133,7 @@ struct MadeiraDockView: View {
     let start: (DockGame, Bool) -> Void
 
     var body: some View {
-        NavigationStack {
+        CompatNavigationStack {
             Form {
                 Section {
                     Text("Madeira Dock starts an installed Steam game through Valve's own Steam client, without the Steam desktop window. Valve's client signs in with your account and decides whether the game may run.")
@@ -142,7 +143,7 @@ struct MadeiraDockView: View {
                     if let name = signIn.accountName {
                         LabeledContent("Signed in", value: name)
                     } else {
-                        Button("Sign in to Steam") { showSignIn = true }
+                        Button("登录 Steam") { showSignIn = true }
                     }
                 }
                 Section {
@@ -154,7 +155,7 @@ struct MadeiraDockView: View {
                         Button("Download Valve's client components (about 73 MB)") { dock.prepareClient() }
                     }
                 } header: { Text("Steam client") } footer: {
-                    Text("Downloaded from Valve's update servers and checked against pinned SHA-256 sums. Existing Steam files are kept.")
+                    Text("从 Valve 更新服务器下载并校验固定的 SHA-256。已有 Steam 文件会保留。")
                 }
                 Section {
                     if dock.games.isEmpty {
@@ -165,12 +166,12 @@ struct MadeiraDockView: View {
                             HStack {
                                 Text(game.name)
                                 Spacer()
-                                if !game.installed { Text("Not fully installed").font(.caption).foregroundStyle(.secondary) }
+                                if !game.installed { Text("未完全安装").font(.caption).foregroundStyle(.secondary) }
                             }
                         }
                         .disabled(!game.installed || !dock.clientInstalled || !signIn.signedIn)
                     }
-                    Toggle("Smaller JIT pool (512 MB) for this launch", isOn: $dock.compactPool)
+                    Toggle("本次启动使用较小的 JIT 池（512 MB）", isOn: $dock.compactPool)
                 } header: { Text("Installed games") } footer: {
                     Text("Games Steam's client has installed in this prefix. Only Steam's default launch option is used.")
                 }
@@ -179,8 +180,8 @@ struct MadeiraDockView: View {
                         ForEach(dock.games.filter { dock.installPrograms[$0.id] != nil }) { game in
                             Picker(game.name, selection: Binding(get: { dock.installRunNext[game.id] ?? true },
                                                                  set: { dock.setRunsInstallers(game.id, $0) })) {
-                                Text("Run at next start").tag(true)
-                                Text("Skip").tag(false)
+                                Text("下次启动时运行").tag(true)
+                                Text("跳过").tag(false)
                             }
                             .pickerStyle(.menu)
                         }
@@ -196,7 +197,7 @@ struct MadeiraDockView: View {
                 }
             }
             .navigationTitle("Madeira Dock").navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } } }
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("完成") { dismiss() } } }
             .onAppear { dock.refresh(); signIn.refresh() }
             .sheet(isPresented: $showSignIn) { SteamSignInView() }
         }
