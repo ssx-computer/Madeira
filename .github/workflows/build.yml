@@ -111,8 +111,7 @@ jobs:
 
       - name: Install tools
         run: |
-          brew install ldid sevenzip
-          pip3 install meson ninja
+          brew install ldid sevenzip meson ninja
 
       - name: Download llvm-mingw toolchain
         run: |
