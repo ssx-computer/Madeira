@@ -25,6 +25,8 @@
 #include <mach/mach.h>
 #include <mach/vm_map.h>
 #include <sys/mman.h>
+#include <sys/sysctl.h>
+#include <unistd.h>
 #include <libkern/OSCacheControl.h>
 #include <os/log.h>
 #include <pthread.h>
@@ -76,8 +78,33 @@ static void fex_log(const char *fmt, ...) {
 // JIT Memory Pool
 // Dual-mapped: RX pages (from debugger) + RW pages (via vm_remap)
 // ---------------------------------------------------------------------------
-static constexpr size_t JIT_POOL_SIZE = 64 * 1024 * 1024; // 64MB
-static constexpr size_t JIT_PAGE_SIZE = 0x4000; // 16KB iOS pages
+// Pool size scales with the device: 64MB covers a 2GB A9 (iPhone 6s), and
+// larger devices get more room for translated code.
+static size_t madeira_pool_size(void) {
+    static size_t sz = 0;
+    if (!sz) {
+        uint64_t ram = 0;
+        size_t len = sizeof(ram);
+        sysctlbyname("hw.memsize", &ram, &len, NULL, 0);
+        if (ram >= 6ull << 30) sz = 256 * 1024 * 1024;       // 6GB+ (Pro iPhones)
+        else if (ram >= 3ull << 30) sz = 128 * 1024 * 1024;  // 3-5GB (iPhone 8/X/11+)
+        else sz = 64 * 1024 * 1024;                          // 2GB (iPhone 6s A9)
+        fex_log("JIT pool size: %zuMB (hw.memsize=%lluMB)", sz >> 20,
+                (unsigned long long)(ram >> 20));
+    }
+    return sz;
+}
+
+// Page size: 16KB on A12+ devices, 4KB on iPhone 6s (A9). Queried at first
+// use instead of hard-coded, so the same binary runs on both.
+static size_t madeira_jit_page_size(void) {
+    static size_t ps = 0;
+    if (!ps) {
+        long v = sysconf(_SC_PAGESIZE);
+        ps = (v > 0) ? (size_t)v : 0x4000;
+    }
+    return ps;
+}
 
 static void *g_jit_rx_base = nullptr;  // Executable view
 static void *g_jit_rw_base = nullptr;  // Writable view
@@ -91,7 +118,7 @@ static size_t align_up(size_t val, size_t align) {
 
 // Sub-allocate from the JIT pool. Returns RX pointer (canonical address).
 static void *jit_pool_alloc(size_t size) {
-    size = align_up(size, JIT_PAGE_SIZE);
+    size = align_up(size, madeira_jit_page_size());
     size_t offset = g_jit_pool_offset.fetch_add(size, std::memory_order_relaxed);
     if (offset + size > g_jit_pool_size) {
         fex_log("JIT pool exhausted: requested %zu at offset %zu (pool size %zu)", size, offset, g_jit_pool_size);
@@ -110,16 +137,33 @@ static bool is_in_jit_pool(void *addr) {
     return a >= base && a < base + g_jit_pool_size;
 }
 
-// Initialize the JIT pool using Strategy 2 (debugger-allocated RX + vm_remap RW)
+// Initialize the JIT pool. NATIVE path first (jailbreak anonymous RWX, or
+// TrollStore MAP_JIT on pre-APRR hardware): one RWX mapping, RX == RW, no
+// debugger needed. Falls back to Strategy 2 (debugger-allocated RX +
+// vm_remap RW) on stock iOS.
 static bool jit_pool_init(void) {
     if (g_jit_rx_base) return true; // Already initialized
+
+    if (madeira_native_jit_available()) {
+        size_t size = madeira_pool_size();
+        void *p = madeira_native_jit_alloc(size);
+        if (p) {
+            g_jit_rx_base = p;
+            g_jit_rw_base = p;   // one RWX mapping: RX and RW are the same view
+            g_jit_pool_size = size;
+            FEXCore::DualMap::WriteOffset = 0;
+            fex_log("JIT pool initialized NATIVE (no debugger): %p, size=%zu", p, size);
+            return true;
+        }
+        fex_log("native JIT alloc failed, falling back to the debugger flow");
+    }
 
     if (!jit_check_debugged()) {
         fex_log("Cannot init JIT pool: debugger not attached");
         return false;
     }
 
-    size_t size = JIT_POOL_SIZE;
+    size_t size = madeira_pool_size();
     mach_port_t task = mach_task_self();
 
     // Step 1: Ask debugger to allocate RX pages
