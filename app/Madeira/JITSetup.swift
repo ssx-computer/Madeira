@@ -546,13 +546,13 @@ struct JITSettingsSection: View {
             Button {
                 coordinator.showSetup = true
             } label: {
-                Label("JIT setup", systemImage: "bolt.badge.clock")
+                Label("JIT 设置", systemImage: "bolt.badge.clock")
             }
             if onboarding.available {
                 Button {
                     onboarding.rerun()
                 } label: {
-                    Label("Run setup again", systemImage: "wand.and.stars")
+                    Label("重新运行设置", systemImage: "wand.and.stars")
                 }
             }
             if coordinator.method == .automatic {
@@ -566,7 +566,7 @@ struct JITSettingsSection: View {
                 } label: {
                     Label("Add the \(JITNetworkShortcut.name) shortcut", systemImage: "plus.square.on.square")
                 }
-                ShareLink(item: url) {
+                Button { CompatShare.shareURL(url) } label: {
                     Label("No internet connection? Add local copy", systemImage: "square.and.arrow.up")
                 }
             }
@@ -594,7 +594,7 @@ struct JITSetupView: View {
     }
 
     var body: some View {
-        NavigationStack {
+        CompatNavigationStack {
             Form {
                 Section {
                     Picker("Method", selection: $coordinator.method) {
@@ -613,7 +613,7 @@ struct JITSetupView: View {
                 } header: {
                     Text("JIT method")
                 } footer: {
-                    Text("Automatic uses StikDebug when it is installed. Madeira does not silently change methods after a failure.")
+                    Text("「自动」在安装了 StikDebug 时使用它。失败后 Madeira 不会静默切换方式。")
                 }
 
                 if coordinator.method != .stikDebug {
@@ -626,7 +626,7 @@ struct JITSetupView: View {
                             .disabled(pairing.active)
                             OnDevicePairingPanel()
                         }
-                        Button("Import pairing file") { importing = true }
+                        Button("导入配对文件") { importing = true }
                         Link("How to create a pairing file",
                              destination: URL(string: "https://github.com/StikDebug/StikDebug-Guide/blob/main/pairing_file.md")!)
                         Button(LocalDevVPN.actionTitle) { LocalDevVPN.open() }
@@ -641,16 +641,16 @@ struct JITSetupView: View {
                     Section {
                         Button("Check setup") { coordinator.prepareBuiltIn() }
                             .disabled(coordinator.busy || !coordinator.pairingImported)
-                        Button("Enable JIT") { coordinator.enableBuiltIn() }
+                        Button("启用 JIT") { coordinator.enableBuiltIn() }
                             .disabled(coordinator.busy || !coordinator.pairingImported)
-                        Button("Reset Developer Disk Image", role: .destructive) {
+                        Button("重置开发者磁盘镜像", role: .destructive) {
                             coordinator.resetDDI()
                         }.disabled(coordinator.busy)
                     }
                 } else {
                     Section {
                         if StikJITHelper.isAvailable {
-                            Button("Enable JIT with StikDebug") { coordinator.enable() { _ in } }
+                            Button("用 StikDebug 启用 JIT") { coordinator.enable() { _ in } }
                         } else {
                             Link("Install StikDebug",
                                  destination: URL(string: "https://github.com/StikDebug/StikDebug/releases/latest")!)
@@ -674,11 +674,11 @@ struct JITSetupView: View {
                     Section { LabeledContent("TXM/SPTM", value: txm ? "Present" : "Not present") }
                 }
             }
-            .navigationTitle("JIT setup")
+            .navigationTitle("JIT 设置")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { coordinator.showSetup = false; dismiss() }
+                    Button("完成") { coordinator.showSetup = false; dismiss() }
                 }
             }
         }
