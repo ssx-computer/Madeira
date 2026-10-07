@@ -510,7 +510,7 @@ struct ControlLayoutMenu: View {
                 menu
             }
         }
-        .alert("Keep the current controls?", isPresented: shown($pending)) {
+        .alert("保留当前控制？", isPresented: shown($pending)) {
             if !presets.readOnly {
                 Button("Keep as \u{201C}\(presets.store.nextCustomName())\u{201D}") {
                     let choice = pending
@@ -524,16 +524,16 @@ struct ControlLayoutMenu: View {
                 pending = nil
                 perform(choice)
             }
-            Button("Cancel", role: .cancel) { pending = nil }
+            Button("取消", role: .cancel) { pending = nil }
         } message: {
-            Text("The controls on screen are not saved in a layout.")
+            Text("屏幕上的控制不会保存到布局中。")
         }
         .alert("Delete \u{201C}\(confirmDelete?.name ?? "")\u{201D}?", isPresented: shown($confirmDelete)) {
             Button("Delete", role: .destructive) {
                 if let p = confirmDelete, presets.delete(p.id) { didChoose?(false) }
                 confirmDelete = nil
             }
-            Button("Cancel", role: .cancel) { confirmDelete = nil }
+            Button("取消", role: .cancel) { confirmDelete = nil }
         }
     }
 
