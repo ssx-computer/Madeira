@@ -217,6 +217,7 @@ enum SteamDirectStart {
         var program: String
         var arguments: String
         var folder: String?
+        var launchIndex: UInt32? = nil
     }
 
     /// Launch types Steam gives entries that are not the game itself.
@@ -270,6 +271,7 @@ enum SteamDirectStart {
         func rank(_ option: SteamLaunchOption) -> Int? {
             let type = option.type.lowercased()
             guard option.betaKey.isEmpty, !otherKinds.contains(type),
+                  option.requiredDLC == nil || option.requiredDLC == "" || option.requiredDLC == "0",
                   option.oslist.isEmpty || option.oslist.lowercased().contains("windows") else { return nil }
             let kind: Int
             if type == "default" { kind = 0 } else if type.isEmpty || type == "none" { kind = 1 } else { kind = 2 }
@@ -298,7 +300,8 @@ enum SteamDirectStart {
                     folder = found
                 }
             }
-            return Choice(program: program, arguments: option.arguments.trimmingCharacters(in: spaces), folder: folder)
+            return Choice(program: program, arguments: option.arguments.trimmingCharacters(in: spaces), folder: folder,
+                          launchIndex: option.index)
         }
         return nil
     }
@@ -524,7 +527,7 @@ struct SteamGamesSection: View {
                             withAnimation(UIAccessibility.isReduceMotionEnabled ? nil : .easeInOut(duration: 0.2)) { showUninstalled.toggle() }
                         } label: {
                             HStack {
-                                Text("Not installed").font(.headline)
+                                Text("未安装").font(.headline)
                                 Text("\(groups.notInstalled.count)").font(.subheadline).foregroundStyle(.secondary)
                                 Spacer()
                                 Image(systemName: "chevron.right").font(.caption.weight(.semibold))
@@ -549,7 +552,7 @@ struct SteamGamesSection: View {
             model.refresh()
             if libraryEnabled { steam.start(); steam.reconcileSession() }
         }
-        .onChange(of: scenePhase) { _, phase in
+        .onChange(of: scenePhase) { phase in
             if phase == .active { model.refresh(); if libraryEnabled { steam.reconcileSession() } }
         }
         .sheet(item: $selected) { selection in
@@ -560,7 +563,7 @@ struct SteamGamesSection: View {
         }
         .sheet(isPresented: $showSignIn) { SteamSignInView() }
         .alert("Steam", isPresented: Binding(get: { steam.error != nil }, set: { if !$0 { steam.error = nil } })) {
-            Button("OK", role: .cancel) { steam.error = nil }
+            Button("好", role: .cancel) { steam.error = nil }
         } message: { Text(steam.error ?? "") }
     }
 
@@ -588,8 +591,8 @@ struct SteamSignInCard: View {
             HStack(spacing: 14) {
                 Image(systemName: "person.crop.circle.badge.plus").font(.system(size: 30)).foregroundStyle(.tint)
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Sign in to Steam").font(.headline)
-                    Text("See your Steam games here and install them without leaving Madeira.")
+                    Text("登录 Steam").font(.headline)
+                    Text("在这里查看你的 Steam 游戏并安装，无需离开 Madeira。")
                         .font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.leading)
                 }
                 Spacer(minLength: 0)
@@ -864,7 +867,7 @@ struct SteamGameSheet: View {
     var body: some View {
         let owned = SteamOwnedLibrary.enabled ? steam.owned : []
         let item = SteamGamesRules.items(installed: games.games, owned: owned, search: "").first { $0.id == appID }
-        NavigationStack {
+        CompatNavigationStack {
             Form {
                 if let item {
                     Section {
@@ -888,9 +891,9 @@ struct SteamGameSheet: View {
                     if let download = steam.downloads[appID] {
                         Section("Download") {
                             SteamDownloadStatus(download: download)
-                            Button("Cancel download", role: .destructive) { confirmCancel = true }
+                            Button("取消下载", role: .destructive) { confirmCancel = true }
                             if case .failed = download.state {
-                                Text("Downloaded parts are kept. Try again to continue where it stopped.")
+                                Text("已下载的部分会保留。重试可从停止处继续。")
                                     .font(.caption).foregroundStyle(.secondary)
                             }
                         }
@@ -906,22 +909,22 @@ struct SteamGameSheet: View {
                         }
                     }
                 } else {
-                    ContentUnavailableView("Game unavailable", systemImage: "questionmark.square.dashed",
+                    CompatContentUnavailableView("Game unavailable", systemImage: "questionmark.square.dashed",
                                            description: Text("Refresh your Steam library and try again."))
                 }
             }
             .navigationTitle("Steam").navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } } }
             .task(id: steam.downloads[appID]?.state) {
                 partial = steam.hasPartialDownload(appID)
                 let values = try? URL.documentsDirectory.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
                 freeSpace = values?.volumeAvailableCapacityForImportantUsage
             }
             .confirmationDialog("Cancel this download? Downloaded files are deleted.", isPresented: $confirmCancel, titleVisibility: .visible) {
-                Button("Cancel download", role: .destructive) {
+                Button("取消下载", role: .destructive) {
                     steam.cancelInstall(appID, installed: games.games.contains { $0.id == appID })
                 }
-                Button("Keep downloading", role: .cancel) {}
+                Button("继续下载", role: .cancel) {}
             }
         }
     }
@@ -1009,12 +1012,12 @@ struct SteamCloudQuitRow: View {
                     Button("Replace the Steam Cloud saves and close", role: .destructive) { confirmReplace = true }
                         .confirmationDialog("Replace the Steam Cloud saves with this device's?", isPresented: $confirmReplace, titleVisibility: .visible) {
                             Button("Replace the cloud saves", role: .destructive) { run(replaceCloud: true) }
-                            Button("Cancel", role: .cancel) { }
-                        } message: { Text("The saves in Steam Cloud are overwritten for every device. Their current copies are saved first, in Files › Madeira › Steam Cloud Backups.") }
+                            Button("取消", role: .cancel) { }
+                        } message: { Text("Steam Cloud 的存档将被所有设备覆盖。当前副本会先备份到 文件 › Madeira › Steam Cloud Backups。") }
                 case nil:
                     EmptyView()
                 }
-                Text("Save in the game first. Uploads this game's saves to Steam Cloud, then closes Madeira; Steam in this session is signed out when the upload starts.")
+                Text("请先在游戏内存档。将本游戏的存档上传到 Steam Cloud，然后关闭 Madeira；上传开始时本会话的 Steam 会退出登录。")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
@@ -1076,14 +1079,14 @@ struct SteamCloudSection: View {
                 ProgressView(value: Double(done), total: Double(max(total, 1))) { Text("Uploading \(done) of \(total)") }
             case .failed(let message):
                 Text(message).font(.callout).foregroundStyle(.orange)
-                Button("Try again") { Task { await steam.syncCloud(appID) } }
+                Button("重试") { Task { await steam.syncCloud(appID) } }
             case .ready:
                 ready(state)
             }
         } else {
             Text("Not synced yet.").foregroundStyle(.secondary)
                 .task { await steam.syncCloud(appID) }
-            Button("Sync now") { Task { await steam.syncCloud(appID) } }
+            Button("立即同步") { Task { await steam.syncCloud(appID) } }
         }
     }
 
@@ -1115,18 +1118,18 @@ struct SteamCloudSection: View {
                 .confirmationDialog("Use the Steam Cloud version of \(Self.saves(conflicts.count)) on this device? This device's copies are saved first, in Files › Madeira › Steam Cloud Backups.",
                                     isPresented: $confirmCloud, titleVisibility: .visible) {
                     Button("Use the Steam Cloud saves", role: .destructive) { Task { await steam.resolveCloud(appID, useCloud: true) } }
-                    Button("Cancel", role: .cancel) {}
+                    Button("取消", role: .cancel) {}
                 }
             Button("Keep this device's saves…") { confirmDevice = true }
                 .confirmationDialog("Keep this device's version of \(Self.saves(conflicts.count))? Saves that differ replace Steam Cloud's for every device; the cloud's copies are saved first, in Files › Madeira › Steam Cloud Backups. Saves missing on this device stay missing, and Steam Cloud keeps them.",
                                     isPresented: $confirmDevice, titleVisibility: .visible) {
                     Button("Keep this device's saves", role: .destructive) { Task { await steam.resolveCloud(appID, useCloud: false) } }
-                    Button("Cancel", role: .cancel) {}
+                    Button("取消", role: .cancel) {}
                 }
         } else if !audit.entries.isEmpty {
             let waiting = audit.count(.differ) + audit.count(.cloudOnly) + audit.count(.localOnly)
             if waiting == 0 {
-                Label("In sync", systemImage: "checkmark.icloud").foregroundStyle(.secondary)
+                Label("已同步", systemImage: "checkmark.icloud").foregroundStyle(.secondary)
             } else {
                 // One-sided leftovers: a file deleted on one side, or automatic sync turned off.
                 LabeledContent("Not synced", value: Self.saves(waiting))
@@ -1144,7 +1147,7 @@ struct SteamCloudSection: View {
         if let last = state.lastUpload, last > 0 {
             Text("Uploaded \(Self.saves(last)).").font(.caption).foregroundStyle(.secondary)
         }
-        Button("Sync now") { Task { await steam.syncCloud(appID) } }
+        Button("立即同步") { Task { await steam.syncCloud(appID) } }
     }
 }
 
@@ -1179,7 +1182,7 @@ struct SteamEntrySection: View {
         Section {
             Picker("Start with", selection: Binding(get: { direct ? SteamDirectStart.mode : "dock" }, set: { choose($0) })) {
                 Text("Madeira Dock").tag("dock")
-                Text("The game").tag(SteamDirectStart.mode)
+                Text("游戏").tag(SteamDirectStart.mode)
             }
             if direct {
                 // The game's own program, from Steam's launch configuration or chosen here.
@@ -1190,7 +1193,7 @@ struct SteamEntrySection: View {
                         .font(.caption).foregroundStyle(.orange)
                 } else {
                     Picker("Program", selection: Binding(get: { entry.steamProgram ?? "" }, set: { pick($0) })) {
-                        if entry.steamProgram == nil { Text("Choose…").tag("") }
+                        if entry.steamProgram == nil { Text("选择…").tag("") }
                         ForEach(pickerPrograms, id: \.self) { Text($0).tag($0) }
                     }.pickerStyle(.navigationLink)
                     if entry.steamProgramSource == "steam" {
@@ -1203,23 +1206,23 @@ struct SteamEntrySection: View {
                 }
             } else {
                 if !dock.clientInstalled {
-                    Text("Madeira Dock needs Valve's client components. Download them in Settings › Steam › Madeira Dock.")
+                    Text("Madeira Dock 需要 Valve 的客户端组件。请在 设置 › Steam › Madeira Dock 中下载。")
                         .font(.caption).foregroundStyle(.orange)
                 }
-                Toggle("Smaller JIT pool (512 MB) for this launch", isOn: $dock.compactPool)
+                Toggle("本次启动使用较小的 JIT 池（512 MB）", isOn: $dock.compactPool)
                 // The game's One-time installs choice (Madeira Dock, DockInstallers).
                 if DockInstallers.choiceEnabled, dock.installPrograms[appID] != nil {
                     Picker("One-time installs", selection: Binding(get: { dock.installRunNext[appID] ?? true },
                                                                    set: { dock.setRunsInstallers(appID, $0) })) {
-                        Text("Run at next start").tag(true)
-                        Text("Skip").tag(false)
+                        Text("下次启动时运行").tag(true)
+                        Text("跳过").tag(false)
                     }.pickerStyle(.menu)
                 }
             }
             if let download {
                 SteamDownloadStatus(download: download)
                 switch download.state {
-                case .active, .queued: Button("Pause update") { steam.pause(appID) }
+                case .active, .queued: Button("暂停更新") { steam.pause(appID) }
                 case .paused, .failed: Button("Resume update") { steam.install(appID) }
                 }
             } else if downloads, steam.updateAvailable(appID: appID, installedBuild: games.builds[appID]) {
@@ -1227,7 +1230,7 @@ struct SteamEntrySection: View {
                     .disabled(!steam.signedIn)
             }
             if downloads, download == nil {
-                Button { steam.repair(appID) } label: { Label("Repair installed files", systemImage: "arrow.triangle.2.circlepath") }
+                Button { steam.repair(appID) } label: { Label("修复已安装文件", systemImage: "arrow.triangle.2.circlepath") }
                     .disabled(!steam.signedIn)
                 Text("Checks installed content and downloads missing or changed files from the current Steam build.")
                     .font(.caption).foregroundStyle(.secondary)
@@ -1236,12 +1239,12 @@ struct SteamEntrySection: View {
             if let freeSpace { LabeledContent("Free space on this device", value: formatBytes(freeSpace)) }
             if let status = dock.status {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Last Dock result").font(.caption).foregroundStyle(.secondary)
+                    Text("上次 Dock 结果").font(.caption).foregroundStyle(.secondary)
                     Text(status).font(.footnote)
                 }
             }
             if managed, download == nil {
-                Button("Uninstall", role: .destructive) { confirmUninstall = true }
+                Button("卸载", role: .destructive) { confirmUninstall = true }
             }
         } header: {
             Text("Steam")
@@ -1260,7 +1263,7 @@ struct SteamEntrySection: View {
         .task(id: "\(entry.steamStart ?? "dock") \(installed?.installed == true) \(download == nil)") { await resolveProgram() }
         .confirmationDialog("Uninstall \(entry.title)? Its downloaded files are deleted from this device. Saves stored elsewhere are kept.",
                             isPresented: $confirmUninstall, titleVisibility: .visible) {
-            Button("Uninstall", role: .destructive) {
+            Button("卸载", role: .destructive) {
                 if let installed { steam.uninstall(installed) }
                 uninstalled()
             }
