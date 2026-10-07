@@ -368,7 +368,7 @@ struct OnDevicePairingPanel: View {
     }
 
     private var cancel: some View {
-        Button("Cancel pairing", role: .cancel) { pairing.cancel() }
+        Button("取消配对", role: .cancel) { pairing.cancel() }
             .font(.subheadline.weight(.semibold))
     }
 }
