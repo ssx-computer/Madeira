@@ -20,11 +20,11 @@ struct SteamSignInView: View {
     private enum Field { case account, password, code }
 
     var body: some View {
-        NavigationStack {
+        CompatNavigationStack {
             Form {
                 Section {
                     VStack(alignment: .leading, spacing: 8) {
-                        Label("Sign in to Steam", systemImage: "person.crop.circle.fill").font(.title2.bold())
+                        Label("登录 Steam", systemImage: "person.crop.circle.fill").font(.title2.bold())
                         Text("Madeira keeps a Steam sign-in so it can start your Steam games with your own account.")
                             .foregroundStyle(.secondary)
                     }.padding(.vertical, 4)
@@ -36,8 +36,8 @@ struct SteamSignInView: View {
                 } else {
                     Section {
                         Picker("Sign-in method", selection: $method) {
-                            Text("Password").tag(SteamSignInModel.SignInMethod.password)
-                            Text("QR code").tag(SteamSignInModel.SignInMethod.qr)
+                            Text("密码").tag(SteamSignInModel.SignInMethod.password)
+                            Text("二维码").tag(SteamSignInModel.SignInMethod.qr)
                         }.pickerStyle(.segmented)
                     }
                     if method == .password { passwordSection } else { qrSection }
@@ -61,13 +61,13 @@ struct SteamSignInView: View {
                 guard !steam.signedIn else { return }
                 if method == .qr { steam.beginQR() } else { focus = .account }
             }
-            .onChange(of: method) { _, value in
+            .onChange(of: method) { value in
                 steam.signInError = nil
                 guard !steam.signedIn else { return }
                 if value == .qr { steam.beginQR() } else { steam.cancelSignIn(); focus = .account }
             }
-            .onChange(of: steam.accountName) { _, name in if name != nil { dismiss() } }
-            .onChange(of: steam.guardPrompt) { _, prompt in if prompt?.codeType != nil { focus = .code } }
+            .onChange(of: steam.accountName) { name in if name != nil { dismiss() } }
+            .onChange(of: steam.guardPrompt) { prompt in if prompt?.codeType != nil { focus = .code } }
             .onDisappear { if !steam.signedIn { steam.cancelSignIn() } }
         }
     }
@@ -75,7 +75,7 @@ struct SteamSignInView: View {
     private func signedInSection(_ name: String) -> some View {
         Section {
             LabeledContent("Account", value: name)
-            Button("Sign out", role: .destructive) { steam.signOut() }
+            Button("退出登录", role: .destructive) { steam.signOut() }
         } footer: {
             Text("Signing out removes the token from this device's Keychain.")
         }
@@ -96,7 +96,7 @@ struct SteamSignInView: View {
                 }
             }.disabled(account.trimmingCharacters(in: .whitespaces).isEmpty || password.isEmpty || steam.signInBusy)
         } footer: {
-            Text("Use your Steam account name, which can differ from your email address.")
+            Text("使用你的 Steam 账户名，它可能与邮箱地址不同。")
         }
     }
 
@@ -143,7 +143,7 @@ struct SteamSignInView: View {
                     .background(Color.white, in: RoundedRectangle(cornerRadius: 14))
                     .frame(maxWidth: .infinity)
                     .accessibilityLabel("Steam sign-in QR code")
-                Text("On another device, open the Steam app, go to Steam Guard, and scan this code.")
+                Text("在另一台设备上打开 Steam 应用，进入 Steam Guard，扫描此二维码。")
                 if let link = steam.qrLink {
                     Button { UIApplication.shared.open(link) } label: {
                         Label("Open in the Steam app on this device", systemImage: "arrow.up.forward.app")
