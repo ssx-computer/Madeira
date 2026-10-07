@@ -6,13 +6,15 @@ import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 
-// First-run setup for JIT, Steam sign-in and Madeira Dock (docs/LIBRARY.md).
+// First-run setup for JIT, Steam sign-in, Madeira Dock and Wine Mono (docs/LIBRARY.md).
 // On a new install, and once after an update that raises the setup revision
 // (`madeiraOnboardingRevision` in UserDefaults, which iOS removes with the app,
 // is below OnboardingRules.revision), the library opens a full-screen setup: welcome, JIT,
 // Steam sign-in, Valve's client components for Madeira Dock (only when Dock is
-// available), done. Every step can be skipped. Settings › JIT or Settings ›
-// Steam can reopen it. env.MADEIRA_ONBOARDING = 0 never opens it.
+// available), Wine Mono (only when this device has none), done. After an update, only the
+// pages added since the revision this device last saw are shown. Every step can be
+// skipped. Settings › JIT or Settings › Steam can reopen it in full.
+// env.MADEIRA_ONBOARDING = 0 never opens it.
 //
 // The JIT page offers three ways in (in-app pairing on iOS 27, a pairing
 // file from a computer, StikDebug), each with its own numbered steps. It stores
@@ -32,33 +34,49 @@ enum OnboardingRules {
     /// release whose setup every existing install should see once.
     static let revisionKey = "madeiraOnboardingRevision"
     /// 1 was the first setup, stored as `madeiraOnboardingDone` (no longer read); 2 adds
-    /// Install LocalDevVPN, on-device pairing and the Madeira JIT shortcut.
-    static let revision = 2
+    /// Install LocalDevVPN, on-device pairing and the Madeira JIT shortcut; 3 adds the
+    /// Wine Mono download.
+    static let revision = 3
 
     /// `env.MADEIRA_ONBOARDING = 0` (madeira.cfg or the environment) never opens
     /// setup and hides "Run setup again". On by default.
     static var enabled: Bool { MadeiraConfig.flag("MADEIRA_ONBOARDING") }
 
     enum Step: String, CaseIterable {
-        case welcome, localDevVPN = "localdevvpn", jit, signIn = "sign-in", dockClient = "dock-client", done
+        case welcome, localDevVPN = "localdevvpn", jit, signIn = "sign-in", dockClient = "dock-client",
+             wineMono = "wine-mono", done
+
+        /// The revision whose setup first had this page.
+        var introduced: Int {
+            switch self {
+            case .localDevVPN: return 2
+            case .wineMono: return 3
+            default: return 1
+            }
+        }
     }
 
     /// LocalDevVPN comes first when it is not installed (`localDevVPN`): every JIT way
     /// reaches this device through it. JIT is always offered. Sign-in is offered when
     /// Steam sign-in is enabled, or when Madeira Dock is available (Dock needs a
-    /// sign-in). Valve's client components are offered only when Dock is available.
-    static func steps(signIn: Bool, dock: Bool, localDevVPN: Bool = false) -> [Step] {
+    /// sign-in). Valve's client components are offered only when Dock is available,
+    /// Wine Mono only when this device has none (`wineMono`). With `since` (the revision
+    /// this device last saw, after an update) only the pages added after it are offered.
+    static func steps(signIn: Bool, dock: Bool, localDevVPN: Bool = false, wineMono: Bool = false,
+                      since: Int = 0) -> [Step] {
         var list: [Step] = [.welcome]
         if localDevVPN { list.append(.localDevVPN) }
         list.append(.jit)
         if signIn || dock { list.append(.signIn) }
         if dock { list.append(.dockClient) }
-        return list + [.done]
+        if wineMono { list.append(.wineMono) }
+        list.append(.done)
+        return since > 0 ? list.filter { $0 == .welcome || $0 == .done || $0.introduced > since } : list
     }
 
     /// Whether there is anything to set up between the welcome and done pages.
     static func hasSetup(_ steps: [Step]) -> Bool {
-        steps.contains(.jit) || steps.contains(.signIn) || steps.contains(.dockClient)
+        steps.contains(.jit) || steps.contains(.signIn) || steps.contains(.dockClient) || steps.contains(.wineMono)
     }
 
     /// Whether setup opens by itself when the library appears.
@@ -98,11 +116,18 @@ enum OnboardingRules {
     /// LocalDevVPN was missing when setup opened, so its page is offered. Fixed for that
     /// run of setup: installing it on the way does not renumber the steps.
     private var offerLocalDevVPN = false
-    var steps: [Step] {
-        OnboardingRules.steps(signIn: SteamSignIn.isEnabled, dock: MadeiraDock.enabled, localDevVPN: offerLocalDevVPN)
+    /// The same for Wine Mono: offered when this device had none when setup opened.
+    private var offerWineMono = !WineMonoModel.available
+    /// The revision this device had seen when setup opened by itself after an update (only
+    /// the pages added since are shown); 0 for a new install and for Run setup again.
+    @Published private(set) var since = 0
+    var steps: [Step] { steps(since: since) }
+    private func steps(since: Int) -> [Step] {
+        OnboardingRules.steps(signIn: SteamSignIn.isEnabled, dock: MadeiraDock.enabled, localDevVPN: offerLocalDevVPN,
+                              wineMono: offerWineMono, since: since)
     }
     /// Setup can be opened: enabled, and something to set up.
-    var available: Bool { Self.enabled && OnboardingRules.hasSetup(steps) }
+    var available: Bool { Self.enabled && OnboardingRules.hasSetup(steps(since: 0)) }
 
     private init() {}
 
@@ -111,17 +136,20 @@ enum OnboardingRules {
     func presentIfNeeded() {
         guard !considered else { return }
         considered = true
-        guard OnboardingRules.shouldShow(seen: Self.seen, enabled: Self.enabled, steps: steps) else { return }
-        open(reason: "revision \(Self.seen)->\(OnboardingRules.revision)")
+        offerWineMono = !WineMonoModel.available
+        guard OnboardingRules.shouldShow(seen: Self.seen, enabled: Self.enabled, steps: steps(since: Self.seen)) else { return }
+        open(reason: "revision \(Self.seen)->\(OnboardingRules.revision)", since: Self.seen)
     }
 
     /// Settings › Steam › Run setup again.
-    func rerun() { open(reason: "settings") }
+    func rerun() { open(reason: "settings", since: 0) }
 
-    private func open(reason: String) {
+    private func open(reason: String, since: Int) {
         // Never over a running session.
         guard available, LibraryModel.shared.current == nil, wine_process_is_running() == 0 else { return }
         offerLocalDevVPN = !LocalDevVPN.isInstalled
+        offerWineMono = !WineMonoModel.available
+        self.since = since
         LogStore.shared.log("[onboarding] shown reason=\(reason) steps=\(steps.map(\.rawValue).joined(separator: ","))")
         go(.welcome)
         presented = true
@@ -165,6 +193,7 @@ struct OnboardingView: View {
     @ObservedObject private var signIn = SteamSignInModel.shared
     @ObservedObject private var dock = MadeiraDockModel.shared
     @ObservedObject private var shortcut = JITNetworkShortcut.shared
+    @ObservedObject private var mono = WineMonoModel.shared
     @State private var showSignIn = false
     @State private var importingPairingFile = false
     @State private var pairingImportError: String?
@@ -182,7 +211,7 @@ struct OnboardingView: View {
     private var device: String { UIDevice.current.userInterfaceIdiom == .pad ? "iPad" : "iPhone" }
 
     var body: some View {
-        NavigationStack {
+        CompatNavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
                     if let position = OnboardingRules.position(of: model.step, in: model.steps), position.count > 1 {
@@ -195,6 +224,7 @@ struct OnboardingView: View {
                     case .jit: jitPage
                     case .signIn: signInPage
                     case .dockClient: dockClientPage
+                    case .wineMono: wineMonoPage
                     case .done: donePage
                     }
                 }
@@ -227,7 +257,7 @@ struct OnboardingView: View {
             dock.refresh()
             localDevVPNInstalled = LocalDevVPN.isInstalled
         }
-        .onChange(of: scenePhase) { _, phase in
+        .onChange(of: scenePhase) { phase in
             if phase == .active { localDevVPNInstalled = LocalDevVPN.isInstalled }
         }
     }
@@ -264,7 +294,7 @@ struct OnboardingView: View {
                 .foregroundStyle(done ? .secondary : .primary)
         }
         .accessibilityElement(children: .combine)
-        .accessibilityValue(done ? Text("Done") : Text(""))
+        .accessibilityValue(done ? Text("完成") : Text(""))
     }
 
     // MARK: Pages
@@ -272,16 +302,23 @@ struct OnboardingView: View {
     private var welcome: some View {
         VStack(alignment: .leading, spacing: 20) {
             Image(systemName: "gamecontroller.fill").font(.system(size: 52)).foregroundStyle(.tint).accessibilityHidden(true)
-            Text("Welcome to Madeira").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
-            Text("Madeira runs Windows games on your \(UIDevice.current.userInterfaceIdiom == .pad ? "iPad" : "iPhone").")
-                .font(.title3)
-            Text("A few optional steps get you ready:").foregroundStyle(.secondary)
+            if model.since > 0 {
+                // After an update: only the pages added since this device last ran setup.
+                Text("New in Madeira").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
+                Text("Since you last ran setup, Madeira has something new to set up:").font(.title3)
+            } else {
+                Text("欢迎使用 Madeira").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
+                Text("Madeira runs Windows games on your \(UIDevice.current.userInterfaceIdiom == .pad ? "iPad" : "iPhone").")
+                    .font(.title3)
+                Text("A few optional steps get you ready:").foregroundStyle(.secondary)
+            }
             let pages = model.steps
             let offered: [LocalizedStringKey] =
                 (pages.contains(.localDevVPN) ? ["Install LocalDevVPN, which Madeira enables JIT through."] : [])
-                + ["Choose how Madeira enables JIT."]
+                + (pages.contains(.jit) ? ["Choose how Madeira enables JIT."] : [])
                 + (pages.contains(.signIn) ? ["Sign in to Steam in Madeira."] : [])
                 + (pages.contains(.dockClient) ? ["Download Valve's Steam client components for Madeira Dock."] : [])
+                + (pages.contains(.wineMono) ? ["Download Wine Mono, for games built on .NET Framework."] : [])
             ForEach(offered.indices, id: \.self) { index in point(index + 1, offered[index]) }
             primary("Get started", symbol: "arrow.right") { model.next() }.padding(.top, 8)
             secondary("Skip setup") { model.skip() }
@@ -384,7 +421,7 @@ struct OnboardingView: View {
             Label("The pairing file is kept in this \(device)'s Keychain.", systemImage: "lock.fill")
                 .font(.subheadline).foregroundStyle(.secondary)
             if fileImported {
-                Label("Pairing file imported", systemImage: "checkmark.circle.fill")
+                Label("配对文件已导入", systemImage: "checkmark.circle.fill")
                     .font(.headline).foregroundStyle(.green)
                 vpnNote
                 primary("Continue", symbol: "arrow.right") { useBuiltIn() }
@@ -513,13 +550,13 @@ struct OnboardingView: View {
                 LogStore.shared.log("[jit-shortcut] add: iCloud link")
                 UIApplication.shared.open(JITShortcutFile.iCloudLink)
             } label: {
-                Label("Add the shortcut", systemImage: "plus.square.on.square")
+                Label("添加快捷指令", systemImage: "plus.square.on.square")
                     .fontWeight(.semibold).frame(maxWidth: .infinity, minHeight: 36)
             }
             .buttonStyle(.bordered).controlSize(.large)
             if let url = JITShortcutFile.url {
-                ShareLink(item: url) {
-                    Text("No internet connection? Add local copy, then choose the Shortcuts app in the share sheet that pops up.")
+                Button { CompatShare.shareURL(url) } label: {
+                    Text("没有网络？添加本地副本，然后在弹出的分享面板中选择「快捷指令」App。")
                         .font(.footnote).frame(maxWidth: .infinity)
                 }
             }
@@ -542,7 +579,7 @@ struct OnboardingView: View {
                  : "Madeira keeps a Steam sign-in so it can start your Steam games with your own account.")
             VStack(alignment: .leading, spacing: 10) {
                 Label("Your password goes only to Steam and is never saved.", systemImage: "lock.fill")
-                Label("The sign-in is kept in this device's Keychain until you sign out.", systemImage: "iphone")
+                Label("登录信息保存在本设备的钥匙串中，直到你退出登录。", systemImage: "iphone")
             }.font(.subheadline).foregroundStyle(.secondary)
             if let name = signIn.accountName {
                 Label("Signed in as \(name)", systemImage: "checkmark.circle.fill").font(.headline).foregroundStyle(.green)
@@ -567,7 +604,7 @@ struct OnboardingView: View {
                     .font(.headline).foregroundStyle(.green)
                 primary("Continue", symbol: "arrow.right") { model.next() }
             } else {
-                Text("About 73 MB from Valve's update servers, checked against pinned SHA-256 sums. No Windows session runs for this.")
+                Text("从 Valve 更新服务器下载约 73 MB，校验固定的 SHA-256。此过程不运行 Windows 会话。")
                     .font(.subheadline).foregroundStyle(.secondary)
                 if dock.preparing {
                     HStack(spacing: 12) { ProgressView(); Text(dock.progress).foregroundStyle(.secondary) }
@@ -586,12 +623,50 @@ struct OnboardingView: View {
         }
     }
 
+    /// Wine Mono, offered when this device has none: games built on .NET Framework need it.
+    /// The download continues if the page is left; Settings › .NET Framework shows it.
+    private var wineMonoPage: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            header("Add .NET Framework support", symbol: "shippingbox.and.arrow.backward")
+            Text("Some Windows games are built on Microsoft's .NET Framework. Madeira runs them on Wine Mono, the Wine project's open-source .NET runtime.")
+            if mono.installed {
+                Label("Wine Mono is installed.", systemImage: "checkmark.circle.fill")
+                    .font(.headline).foregroundStyle(.green)
+                primary("Continue", symbol: "arrow.right") { model.next() }
+            } else {
+                Text("Madeira downloads it from WineHQ: about 42 MB, about 130 MB once installed. Most games do not need it; you can also add it later in Settings.")
+                    .font(.subheadline).foregroundStyle(.secondary)
+                switch mono.phase {
+                case .downloading(let f), .installing(let f):
+                    VStack(alignment: .leading, spacing: 8) {
+                        ProgressView(value: f)
+                        Text(mono.status).font(.subheadline).foregroundStyle(.secondary).monospacedDigit()
+                    }
+                case .idle:
+                    if let error = mono.error {
+                        Label(error, systemImage: "exclamationmark.circle.fill").foregroundStyle(.red)
+                    }
+                    primary(mono.error == nil ? "Download Wine Mono" : "Try again", symbol: "arrow.down.circle.fill") {
+                        LogStore.shared.log("[onboarding] Wine Mono download")
+                        mono.install()
+                    }
+                }
+                secondary("Set up later") { model.next() }
+            }
+        }
+    }
+
     private var donePage: some View {
         VStack(alignment: .leading, spacing: 18) {
             header("You're all set", symbol: "checkmark.seal.fill")
-            Text("You can change the JIT method or import a pairing file from Settings › JIT.")
+            if model.steps.contains(.jit) {
+                Text("You can change the JIT method or import a pairing file from Settings › JIT.")
+            }
             if model.steps.contains(.dockClient) {
                 Text("Settings › Steam › Madeira Dock lists the Steam games installed in Madeira's drive_c and starts them.")
+            }
+            if model.steps.contains(.wineMono) {
+                Text("Settings › .NET Framework downloads or removes Wine Mono.")
             }
             Text("You can run this setup again from Settings › JIT or Settings › Steam.").foregroundStyle(.secondary)
             primary("Go to your library", symbol: "square.grid.2x2.fill") { model.finish() }
@@ -623,7 +698,7 @@ struct SteamSettingsSection: View {
                 LabeledContent("Signed in as", value: name)
                 Button("Sign out of Steam", role: .destructive) { confirmSignOut = true }
             } else {
-                Button { open(.steamSignIn) } label: { Label("Sign in to Steam", systemImage: "person.crop.circle.badge.plus") }
+                Button { open(.steamSignIn) } label: { Label("登录 Steam", systemImage: "person.crop.circle.badge.plus") }
             }
             if MadeiraDock.enabled {
                 Button { open(.dock) } label: { Label("Madeira Dock", systemImage: "shippingbox") }
@@ -632,7 +707,7 @@ struct SteamSettingsSection: View {
                 }
             }
             if onboarding.available {
-                Button { onboarding.rerun() } label: { Label("Run setup again", systemImage: "wand.and.stars") }
+                Button { onboarding.rerun() } label: { Label("重新运行设置", systemImage: "wand.and.stars") }
             }
         } header: {
             Text("Steam")
@@ -640,7 +715,7 @@ struct SteamSettingsSection: View {
             Text("Madeira keeps a Steam sign-in token in this device's Keychain, for this device only. Signing out removes it.")
         }
         .confirmationDialog("Sign out of Steam?", isPresented: $confirmSignOut, titleVisibility: .visible) {
-            Button("Sign out", role: .destructive) { signIn.signOut() }
+            Button("退出登录", role: .destructive) { signIn.signOut() }
         }
         .onAppear { signIn.refresh() }
         .onReceive(NotificationCenter.default.publisher(for: SteamSignIn.didChange)) { _ in signIn.refresh() }
