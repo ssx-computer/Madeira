@@ -337,7 +337,7 @@ struct SavesSection: View {
             .disabled(busy)
             if let m = message { Text(m).font(.caption).foregroundStyle(.secondary) }
         } header: {
-            Text("Saves")
+            Text("存档")
         } footer: {
             Text("A backup is one zip of every Windows user's Documents, Saved Games and AppData (caches left out), "
                  + "to keep in Files or iCloud Drive. Restoring puts those files back and overwrites saves with "
