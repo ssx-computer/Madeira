@@ -13,7 +13,10 @@ if [ ! -f "$B/CMakeCache.txt" ]; then
     # each value) so no toolchain file is needed.
     TC="$R/toolchains/llvm-mingw-20260421-ucrt-macos-universal/bin"
     MINGW_FLAGS_INIT="-static -static-libgcc -static-libstdc++ -Wl,--file-alignment=4096,/mllvm:-align-loops=1"
-    cmake -S "$R/FEX" -B "$B" -DCMAKE_BUILD_TYPE=Release -DTUNE_CPU=generic \
+    # FEX_IOS_HOST_BUILD switches arm64ecfex to the plain -static link rules;
+    # without it the -nostdlib path runs, which cannot reconcile EC-mangled
+    # CRT symbols on a macOS-host llvm-mingw (see ARM64EC/CMakeLists.txt).
+    cmake -S "$R/FEX" -B "$B" -DCMAKE_BUILD_TYPE=Release -DTUNE_CPU=generic -DFEX_IOS_HOST_BUILD=1 \
         -DCMAKE_C_FLAGS="-DFEX_IOS_HOST=1" -DCMAKE_CXX_FLAGS="-DFEX_IOS_HOST=1" \
         -DCMAKE_SYSTEM_NAME=Windows \
         -DCMAKE_SYSTEM_PROCESSOR=arm64ec-w64-mingw32 \
